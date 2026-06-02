@@ -3350,6 +3350,42 @@ func TestGetAppRefresh_HardRefresh(t *testing.T) {
 	}
 }
 
+func TestGetQueryContextScenarios(t *testing.T) {
+	ctx := t.Context()
+	ctx = context.WithValue(ctx, "claims", &jwt.MapClaims{"groups": []string{"admin"}})
+	testApp := newTestApp()
+	appServer := newTestAppServer(t, testApp)
+
+	t.Run("normal query", func(t *testing.T) {
+		project := "default"
+		app, err := appServer.Get(ctx, &application.ApplicationQuery{
+			Name:         &testApp.Name,
+			AppNamespace: &testApp.Namespace,
+			Project:      []string{project},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, testApp.Name, app.Name)
+		assert.Equal(t, testApp.Namespace, app.Namespace)
+	})
+
+	t.Run("cross project query denied", func(t *testing.T) {
+		wrongProject := "my-proj"
+		_, err := appServer.Get(ctx, &application.ApplicationQuery{
+			Name:         &testApp.Name,
+			AppNamespace: &testApp.Namespace,
+			Project:      []string{wrongProject},
+		})
+		require.Error(t, err)
+		assert.Equal(t, codes.NotFound, status.Code(err))
+	})
+
+	t.Run("empty namespace defaults", func(t *testing.T) {
+		app, err := appServer.Get(ctx, &application.ApplicationQuery{Name: &testApp.Name})
+		require.NoError(t, err)
+		assert.Equal(t, testNamespace, app.Namespace)
+	})
+}
+
 func TestGetApp_HealthStatusPropagation(t *testing.T) {
 	newServerWithTree := func(t *testing.T) (*Server, *v1alpha1.Application) {
 		t.Helper()
