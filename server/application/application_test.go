@@ -5168,3 +5168,260 @@ func TestGetUnstructuredLiveResourceOrAppWithImpersonation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "system:serviceaccount:"+test.FakeDestNamespace+":test-sa", config.Impersonate.UserName)
 }
+
+func TestNewAppQueryContext(t *testing.T) {
+	ctx := t.Context()
+	//nolint:staticcheck
+	ctx = context.WithValue(ctx, "claims", &jwt.RegisteredClaims{Subject: "test-user"})
+	appServer := newTestAppServer(t)
+
+	t.Run("resolves namespace to server namespace when empty", func(t *testing.T) {
+		qctx := appServer.newAppQueryContext(ctx, rbac.ActionGet, "my-proj", "", "test-app")
+		assert.Equal(t, "test-app", qctx.AppName)
+		assert.Equal(t, testNamespace, qctx.AppNamespace)
+		assert.Equal(t, "my-proj", qctx.Project)
+		assert.Equal(t, rbac.ActionGet, qctx.Action)
+		assert.Equal(t, "test-user", qctx.User)
+		assert.NotNil(t, qctx.Claims)
+	})
+
+	t.Run("preserves namespace when provided", func(t *testing.T) {
+		qctx := appServer.newAppQueryContext(ctx, rbac.ActionGet, "my-proj", "other-ns", "test-app")
+		assert.Equal(t, "other-ns", qctx.AppNamespace)
+	})
+
+	t.Run("defaults user to Unknown when session has no username", func(t *testing.T) {
+		qctx := appServer.newAppQueryContext(t.Context(), rbac.ActionGet, "", "", "test-app")
+		assert.Equal(t, "Unknown user", qctx.User)
+	})
+}
+
+func TestAppQueryContext_RBACName(t *testing.T) {
+	t.Run("constructs RBAC name without extra namespace when same as default", func(t *testing.T) {
+		qctx := &appQueryContext{
+			AppName:      "my-app",
+			AppNamespace: "argocd",
+			Project:      "default",
+		}
+		assert.Equal(t, "default/my-app", qctx.rbacName("argocd"))
+	})
+
+	t.Run("constructs RBAC name with namespace when different from default", func(t *testing.T) {
+		qctx := &appQueryContext{
+			AppName:      "my-app",
+			AppNamespace: "other-ns",
+			Project:      "my-proj",
+		}
+		assert.Equal(t, "my-proj/other-ns/my-app", qctx.rbacName("argocd"))
+	})
+
+	t.Run("constructs RBAC name for default project", func(t *testing.T) {
+		qctx := &appQueryContext{
+			AppName:      "my-app",
+			AppNamespace: "argocd",
+			Project:      "default",
+		}
+		assert.Equal(t, "default/my-app", qctx.rbacName("argocd"))
+	})
+}
+
+func TestAppQueryContext_LogFields(t *testing.T) {
+	qctx := &appQueryContext{
+		AppName:      "test-app",
+		AppNamespace: "default",
+		User:         "admin",
+	}
+	fields := qctx.logFields()
+	assert.Equal(t, "admin", fields["user"])
+	assert.Equal(t, "test-app", fields["application"])
+	assert.Equal(t, "default", fields["namespace"])
+}
+
+func TestAppQueryContext_EnforceRBAC(t *testing.T) {
+	ctx := t.Context()
+	//nolint:staticcheck
+	ctx = context.WithValue(ctx, "claims", &jwt.RegisteredClaims{Subject: "test-user"})
+	appServer := newTestAppServer(t)
+	_ = appServer.enf.SetBuiltinPolicy(`
+		p, test-user, applications, get, default/*, allow
+		p, test-user, applications, sync, default/*, deny`)
+
+	t.Run("allows when policy permits", func(t *testing.T) {
+		qctx := appServer.newAppQueryContext(ctx, rbac.ActionGet, "default", "", "test-app")
+		err := qctx.enforceRBAC(appServer.enf, appServer.ns)
+		assert.NoError(t, err)
+	})
+
+	t.Run("denies when policy denies", func(t *testing.T) {
+		qctx := appServer.newAppQueryContext(ctx, rbac.ActionSync, "default", "", "test-app")
+		err := qctx.enforceRBAC(appServer.enf, appServer.ns)
+		assert.Error(t, err)
+		assert.Equal(t, codes.PermissionDenied.String(), status.Code(err).String())
+	})
+
+	t.Run("enforceRBACAction uses specified action", func(t *testing.T) {
+		qctx := appServer.newAppQueryContext(ctx, rbac.ActionGet, "default", "", "test-app")
+		err := qctx.enforceRBACAction(appServer.enf, appServer.ns, rbac.ActionSync)
+		assert.Error(t, err)
+		assert.Equal(t, codes.PermissionDenied.String(), status.Code(err).String())
+	})
+}
+
+func TestGetApplicationWithQueryContext_NormalQuery(t *testing.T) {
+	ctx := t.Context()
+	//nolint:staticcheck
+	ctx = context.WithValue(ctx, "claims", &jwt.RegisteredClaims{Subject: "test-user"})
+	appServer := newTestAppServer(t)
+	_ = appServer.enf.SetBuiltinPolicy(`
+		p, test-user, applications, get, default/*, allow
+		p, test-user, applications, create, default/*, allow`)
+
+	testApp := newTestApp()
+	created, err := appServer.Create(ctx, &application.ApplicationCreateRequest{Application: testApp})
+	require.NoError(t, err)
+
+	t.Run("fetches application via client successfully", func(t *testing.T) {
+		qctx := appServer.newAppQueryContext(ctx, rbac.ActionGet, "default", "", created.Name)
+		a, proj, err := appServer.getApplicationWithQueryContextClient(ctx, qctx)
+		require.NoError(t, err)
+		assert.Equal(t, created.Name, a.Name)
+		assert.NotNil(t, proj)
+	})
+
+	t.Run("fetches application via informer successfully", func(t *testing.T) {
+		qctx := appServer.newAppQueryContext(ctx, rbac.ActionGet, "default", "", created.Name)
+		a, proj, err := appServer.getApplicationWithQueryContextInformer(ctx, qctx)
+		require.NoError(t, err)
+		assert.Equal(t, created.Name, a.Name)
+		assert.NotNil(t, proj)
+	})
+}
+
+func TestGetApplicationWithQueryContext_CrossProjectRejected(t *testing.T) {
+	ctx := t.Context()
+	//nolint:staticcheck
+	ctx = context.WithValue(ctx, "claims", &jwt.RegisteredClaims{Subject: "test-user"})
+	appServer := newTestAppServer(t)
+	_ = appServer.enf.SetBuiltinPolicy(`
+		p, test-user, applications, get, default/*, allow
+		p, test-user, applications, get, my-proj/*, allow
+		p, test-user, applications, create, default/*, allow`)
+
+	testApp := newTestApp(func(app *v1alpha1.Application) {
+		app.Spec.Project = "default"
+	})
+	created, err := appServer.Create(ctx, &application.ApplicationCreateRequest{Application: testApp})
+	require.NoError(t, err)
+
+	t.Run("returns not found when querying with wrong project", func(t *testing.T) {
+		qctx := appServer.newAppQueryContext(ctx, rbac.ActionGet, "my-proj", "", created.Name)
+		_, _, err := appServer.getApplicationWithQueryContextClient(ctx, qctx)
+		assert.Equal(t, codes.NotFound.String(), status.Code(err).String())
+	})
+}
+
+func TestGetApplicationWithQueryContext_EmptyNamespace(t *testing.T) {
+	ctx := t.Context()
+	//nolint:staticcheck
+	ctx = context.WithValue(ctx, "claims", &jwt.RegisteredClaims{Subject: "test-user"})
+	appServer := newTestAppServer(t)
+	_ = appServer.enf.SetBuiltinPolicy(`
+		p, test-user, applications, get, default/*, allow
+		p, test-user, applications, create, default/*, allow`)
+
+	testApp := newTestApp()
+	created, err := appServer.Create(ctx, &application.ApplicationCreateRequest{Application: testApp})
+	require.NoError(t, err)
+
+	t.Run("empty namespace defaults to server namespace", func(t *testing.T) {
+		qctx := appServer.newAppQueryContext(ctx, rbac.ActionGet, "default", "", created.Name)
+		assert.Equal(t, testNamespace, qctx.AppNamespace)
+
+		a, _, err := appServer.getApplicationWithQueryContextClient(ctx, qctx)
+		require.NoError(t, err)
+		assert.Equal(t, created.Name, a.Name)
+	})
+
+	t.Run("Get endpoint works with empty namespace in query", func(t *testing.T) {
+		a, err := appServer.Get(ctx, &application.ApplicationQuery{Name: &created.Name})
+		require.NoError(t, err)
+		assert.Equal(t, created.Name, a.Name)
+	})
+}
+
+func TestDeleteWithQueryContext(t *testing.T) {
+	ctx := t.Context()
+	//nolint:staticcheck
+	ctx = context.WithValue(ctx, "claims", &jwt.RegisteredClaims{Subject: "test-user"})
+	appServer := newTestAppServer(t)
+	_ = appServer.enf.SetBuiltinPolicy(`
+		p, test-user, applications, get, default/*, allow
+		p, test-user, applications, create, default/*, allow
+		p, test-user, applications, delete, default/*, allow`)
+
+	testApp := newTestApp()
+	created, err := appServer.Create(ctx, &application.ApplicationCreateRequest{Application: testApp})
+	require.NoError(t, err)
+
+	fakeAppCs := appServer.appclientset.(*deepCopyAppClientset).GetUnderlyingClientSet().(*apps.Clientset)
+	fakeAppCs.ReactionChain = nil
+	deleted := false
+	fakeAppCs.AddReactor("delete", "applications", func(_ kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+		deleted = true
+		return true, nil, nil
+	})
+	fakeAppCs.AddReactor("get", "applications", func(_ kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+		return true, &v1alpha1.Application{Spec: v1alpha1.ApplicationSpec{Source: &v1alpha1.ApplicationSource{}}}, nil
+	})
+	fakeAppCs.AddReactor("patch", "applications", func(_ kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+		return true, nil, nil
+	})
+
+	cascade := true
+	_, err = appServer.Delete(ctx, &application.ApplicationDeleteRequest{Name: &created.Name, Cascade: &cascade})
+	require.NoError(t, err)
+	assert.True(t, deleted)
+}
+
+func TestSyncWithQueryContext(t *testing.T) {
+	ctx := t.Context()
+	//nolint:staticcheck
+	ctx = context.WithValue(ctx, "claims", &jwt.RegisteredClaims{Subject: "test-user"})
+	appServer := newTestAppServer(t)
+	_ = appServer.enf.SetBuiltinPolicy(`
+		p, test-user, applications, get, default/*, allow
+		p, test-user, applications, create, default/*, allow
+		p, test-user, applications, sync, default/*, allow`)
+
+	testApp := newTestApp()
+	created, err := appServer.Create(ctx, &application.ApplicationCreateRequest{Application: testApp})
+	require.NoError(t, err)
+
+	syncReq := &application.ApplicationSyncRequest{
+		Name: &created.Name,
+	}
+	_, err = appServer.Sync(ctx, syncReq)
+	require.NoError(t, err)
+}
+
+func TestRollbackWithQueryContext(t *testing.T) {
+	ctx := t.Context()
+	//nolint:staticcheck
+	ctx = context.WithValue(ctx, "claims", &jwt.RegisteredClaims{Subject: "test-user"})
+	appServer := newTestAppServer(t)
+	_ = appServer.enf.SetBuiltinPolicy(`
+		p, test-user, applications, get, default/*, allow
+		p, test-user, applications, create, default/*, allow
+		p, test-user, applications, sync, default/*, allow`)
+
+	testApp := newTestApp()
+	created, err := appServer.Create(ctx, &application.ApplicationCreateRequest{Application: testApp})
+	require.NoError(t, err)
+
+	rollbackID := int64(1)
+	_, err = appServer.Rollback(ctx, &application.ApplicationRollbackRequest{
+		Name: &created.Name,
+		Id:   &rollbackID,
+	})
+	assert.Error(t, err)
+}

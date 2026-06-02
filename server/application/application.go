@@ -253,6 +253,75 @@ func (s *Server) getAppEnforceRBAC(ctx context.Context, action, project, namespa
 	return a, proj, nil
 }
 
+type appQueryContext struct {
+	AppName         string
+	AppNamespace    string
+	Project         string
+	Action          string
+	Claims          any
+	User            string
+	ResourceVersion string
+}
+
+func (s *Server) newAppQueryContext(ctx context.Context, action, project, namespace, name string) *appQueryContext {
+	user := session.Username(ctx)
+	if user == "" {
+		user = "Unknown user"
+	}
+	return &appQueryContext{
+		AppName:      name,
+		AppNamespace: s.appNamespaceOrDefault(namespace),
+		Project:      project,
+		Action:       action,
+		Claims:       ctx.Value("claims"),
+		User:         user,
+	}
+}
+
+func (qctx *appQueryContext) logFields() map[string]any {
+	return map[string]any{
+		"user":        qctx.User,
+		"application": qctx.AppName,
+		"namespace":   qctx.AppNamespace,
+	}
+}
+
+func (qctx *appQueryContext) rbacName(defaultNS string) string {
+	return security.RBACName(defaultNS, qctx.Project, qctx.AppNamespace, qctx.AppName)
+}
+
+func (qctx *appQueryContext) enforceRBAC(enf *rbac.Enforcer, defaultNS string) error {
+	return enf.EnforceErr(qctx.Claims, rbac.ResourceApplications, qctx.Action, qctx.rbacName(defaultNS))
+}
+
+func (qctx *appQueryContext) enforceRBACAction(enf *rbac.Enforcer, defaultNS, action string) error {
+	return enf.EnforceErr(qctx.Claims, rbac.ResourceApplications, action, qctx.rbacName(defaultNS))
+}
+
+func (s *Server) getApplicationWithQueryContextInformer(ctx context.Context, qctx *appQueryContext) (*v1alpha1.Application, *v1alpha1.AppProject, error) {
+	return s.getAppEnforceRBAC(ctx, qctx.Action, qctx.Project, qctx.AppNamespace, qctx.AppName, func() (*v1alpha1.Application, error) {
+		if !s.isNamespaceEnabled(qctx.AppNamespace) {
+			return nil, security.NamespaceNotPermittedError(qctx.AppNamespace)
+		}
+		return s.appLister.Applications(qctx.AppNamespace).Get(qctx.AppName)
+	})
+}
+
+func (s *Server) getApplicationWithQueryContextClient(ctx context.Context, qctx *appQueryContext) (*v1alpha1.Application, *v1alpha1.AppProject, error) {
+	return s.getAppEnforceRBAC(ctx, qctx.Action, qctx.Project, qctx.AppNamespace, qctx.AppName, func() (*v1alpha1.Application, error) {
+		if !s.isNamespaceEnabled(qctx.AppNamespace) {
+			return nil, security.NamespaceNotPermittedError(qctx.AppNamespace)
+		}
+		app, err := s.appclientset.ArgoprojV1alpha1().Applications(qctx.AppNamespace).Get(ctx, qctx.AppName, metav1.GetOptions{
+			ResourceVersion: qctx.ResourceVersion,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return app, nil
+	})
+}
+
 // getApplicationEnforceRBACInformer uses an informer to get an Application. If the app does not exist, permission is
 // denied, or any other error occurs when getting the app, we return a permission denied error to obscure any sensitive
 // information.
@@ -779,9 +848,6 @@ func (s *Server) GetManifestsWithFiles(stream application.ApplicationService_Get
 
 // Get returns an application by name
 func (s *Server) Get(ctx context.Context, q *application.ApplicationQuery) (*v1alpha1.Application, error) {
-	appName := q.GetName()
-	appNs := s.appNamespaceOrDefault(q.GetAppNamespace())
-
 	project := ""
 	projects := getProjectsFromApplicationQuery(*q)
 	if len(projects) == 1 {
@@ -790,10 +856,10 @@ func (s *Server) Get(ctx context.Context, q *application.ApplicationQuery) (*v1a
 		return nil, status.Errorf(codes.InvalidArgument, "multiple projects specified - the get endpoint accepts either zero or one project")
 	}
 
-	// We must use a client Get instead of an informer Get, because it's common to call Get immediately
-	// following a Watch (which is not yet powered by an informer), and the Get must reflect what was
-	// previously seen by the client.
-	a, proj, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionGet, project, appNs, appName, q.GetResourceVersion())
+	qctx := s.newAppQueryContext(ctx, rbac.ActionGet, project, q.GetAppNamespace(), q.GetName())
+	qctx.ResourceVersion = q.GetResourceVersion()
+
+	a, proj, err := s.getApplicationWithQueryContextClient(ctx, qctx)
 	if err != nil {
 		return nil, err
 	}
@@ -807,12 +873,11 @@ func (s *Server) Get(ctx context.Context, q *application.ApplicationQuery) (*v1a
 	if *q.Refresh == string(v1alpha1.RefreshTypeHard) {
 		refreshType = v1alpha1.RefreshTypeHard
 	}
-	appIf := s.appclientset.ArgoprojV1alpha1().Applications(appNs)
+	appIf := s.appclientset.ArgoprojV1alpha1().Applications(qctx.AppNamespace)
 
-	// subscribe early with buffered channel to ensure we don't miss events
 	events := make(chan *v1alpha1.ApplicationWatchEvent, watchAPIBufferSize)
 	unsubscribe := s.appBroadcaster.Subscribe(events, func(event *v1alpha1.ApplicationWatchEvent) bool {
-		return event.Application.Name == appName && event.Application.Namespace == appNs
+		return event.Application.Name == qctx.AppName && event.Application.Namespace == qctx.AppNamespace
 	})
 	defer unsubscribe()
 
@@ -825,7 +890,7 @@ func (s *Server) Get(ctx context.Context, q *application.ApplicationQuery) (*v1a
 		hydrateType = &ht
 	}
 
-	app, err := argo.RefreshApp(appIf, appName, refreshType, hydrateType)
+	app, err := argo.RefreshApp(appIf, qctx.AppName, refreshType, hydrateType)
 	if err != nil {
 		return nil, fmt.Errorf("error refreshing the app: %w", err)
 	}
@@ -857,7 +922,7 @@ func (s *Server) Get(ctx context.Context, q *application.ApplicationQuery) (*v1a
 			_, err = client.GetAppDetails(ctx, &apiclient.RepoServerAppDetailsQuery{
 				Repo:               repo,
 				Source:             &source,
-				AppName:            appName,
+				AppName:            qctx.AppName,
 				KustomizeOptions:   kustomizeSettings,
 				Repos:              helmRepos,
 				NoCache:            true,
@@ -1161,9 +1226,8 @@ func (s *Server) getAppProject(ctx context.Context, a *v1alpha1.Application, log
 
 // Delete removes an application and all associated resources
 func (s *Server) Delete(ctx context.Context, q *application.ApplicationDeleteRequest) (*application.ApplicationResponse, error) {
-	appName := q.GetName()
-	appNs := s.appNamespaceOrDefault(q.GetAppNamespace())
-	a, _, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionGet, q.GetProject(), appNs, appName, "")
+	qctx := s.newAppQueryContext(ctx, rbac.ActionGet, q.GetProject(), q.GetAppNamespace(), q.GetName())
+	a, _, err := s.getApplicationWithQueryContextClient(ctx, qctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1171,7 +1235,7 @@ func (s *Server) Delete(ctx context.Context, q *application.ApplicationDeleteReq
 	s.projectLock.RLock(a.Spec.Project)
 	defer s.projectLock.RUnlock(a.Spec.Project)
 
-	if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionDelete, a.RBACName(s.ns)); err != nil {
+	if err := s.enf.EnforceErr(qctx.Claims, rbac.ResourceApplications, rbac.ActionDelete, a.RBACName(s.ns)); err != nil {
 		return nil, err
 	}
 
@@ -1216,7 +1280,7 @@ func (s *Server) Delete(ctx context.Context, q *application.ApplicationDeleteReq
 		}
 	}
 
-	err = s.appclientset.ArgoprojV1alpha1().Applications(appNs).Delete(ctx, appName, metav1.DeleteOptions{})
+	err = s.appclientset.ArgoprojV1alpha1().Applications(qctx.AppNamespace).Delete(ctx, qctx.AppName, metav1.DeleteOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("error deleting application: %w", err)
 	}
@@ -2068,7 +2132,8 @@ func isTheSelectedOne(currentNode *v1alpha1.ResourceNode, q *application.Applica
 
 // Sync syncs an application to its target state
 func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncRequest) (*v1alpha1.Application, error) {
-	a, proj, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionGet, syncReq.GetProject(), syncReq.GetAppNamespace(), syncReq.GetName(), "")
+	qctx := s.newAppQueryContext(ctx, rbac.ActionGet, syncReq.GetProject(), syncReq.GetAppNamespace(), syncReq.GetName())
+	a, proj, err := s.getApplicationWithQueryContextClient(ctx, qctx)
 	if err != nil {
 		return nil, err
 	}
@@ -2083,12 +2148,12 @@ func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncR
 		return a, status.Errorf(codes.PermissionDenied, "cannot sync: blocked by sync window")
 	}
 
-	if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionSync, a.RBACName(s.ns)); err != nil {
+	if err := s.enf.EnforceErr(qctx.Claims, rbac.ResourceApplications, rbac.ActionSync, a.RBACName(s.ns)); err != nil {
 		return nil, err
 	}
 
 	if syncReq.Manifests != nil {
-		if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionOverride, a.RBACName(s.ns)); err != nil {
+		if err := s.enf.EnforceErr(qctx.Claims, rbac.ResourceApplications, rbac.ActionOverride, a.RBACName(s.ns)); err != nil {
 			return nil, err
 		}
 		if a.Spec.SyncPolicy != nil && a.Spec.SyncPolicy.IsAutomatedSyncEnabled() && !syncReq.GetDryRun() {
@@ -2159,10 +2224,8 @@ func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncR
 		op.Retry = *retry
 	}
 
-	appName := syncReq.GetName()
-	appNs := s.appNamespaceOrDefault(syncReq.GetAppNamespace())
-	appIf := s.appclientset.ArgoprojV1alpha1().Applications(appNs)
-	a, err = argo.SetAppOperation(appIf, appName, &op)
+	appIf := s.appclientset.ArgoprojV1alpha1().Applications(qctx.AppNamespace)
+	a, err = argo.SetAppOperation(appIf, qctx.AppName, &op)
 	if err != nil {
 		return nil, fmt.Errorf("error setting app operation: %w", err)
 	}
@@ -2249,7 +2312,8 @@ func (s *Server) resolveSourceRevisions(ctx context.Context, a *v1alpha1.Applica
 }
 
 func (s *Server) Rollback(ctx context.Context, rollbackReq *application.ApplicationRollbackRequest) (*v1alpha1.Application, error) {
-	a, _, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionSync, rollbackReq.GetProject(), rollbackReq.GetAppNamespace(), rollbackReq.GetName(), "")
+	qctx := s.newAppQueryContext(ctx, rbac.ActionSync, rollbackReq.GetProject(), rollbackReq.GetAppNamespace(), rollbackReq.GetName())
+	a, _, err := s.getApplicationWithQueryContextClient(ctx, qctx)
 	if err != nil {
 		return nil, err
 	}
@@ -2299,10 +2363,8 @@ func (s *Server) Rollback(ctx context.Context, rollbackReq *application.Applicat
 		},
 		InitiatedBy: v1alpha1.OperationInitiator{Username: session.Username(ctx)},
 	}
-	appName := rollbackReq.GetName()
-	appNs := s.appNamespaceOrDefault(rollbackReq.GetAppNamespace())
-	appIf := s.appclientset.ArgoprojV1alpha1().Applications(appNs)
-	a, err = argo.SetAppOperation(appIf, appName, &op)
+	appIf := s.appclientset.ArgoprojV1alpha1().Applications(qctx.AppNamespace)
+	a, err = argo.SetAppOperation(appIf, qctx.AppName, &op)
 	if err != nil {
 		return nil, fmt.Errorf("error setting app operation: %w", err)
 	}
@@ -2492,9 +2554,8 @@ func (s *Server) resolveRevision(ctx context.Context, app *v1alpha1.Application,
 }
 
 func (s *Server) TerminateOperation(ctx context.Context, termOpReq *application.OperationTerminateRequest) (*application.OperationTerminateResponse, error) {
-	appName := termOpReq.GetName()
-	appNs := s.appNamespaceOrDefault(termOpReq.GetAppNamespace())
-	a, _, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionSync, termOpReq.GetProject(), appNs, appName, "")
+	qctx := s.newAppQueryContext(ctx, rbac.ActionSync, termOpReq.GetProject(), termOpReq.GetAppNamespace(), termOpReq.GetName())
+	a, _, err := s.getApplicationWithQueryContextClient(ctx, qctx)
 	if err != nil {
 		return nil, err
 	}
@@ -2504,7 +2565,7 @@ func (s *Server) TerminateOperation(ctx context.Context, termOpReq *application.
 			return nil, status.Errorf(codes.InvalidArgument, "Unable to terminate operation. No operation is in progress")
 		}
 		a.Status.OperationState.Phase = common.OperationTerminating
-		updated, err := s.appclientset.ArgoprojV1alpha1().Applications(appNs).Update(ctx, a, metav1.UpdateOptions{})
+		updated, err := s.appclientset.ArgoprojV1alpha1().Applications(qctx.AppNamespace).Update(ctx, a, metav1.UpdateOptions{})
 		if err == nil {
 			s.waitSync(updated)
 			s.logAppEvent(ctx, a, argo.EventReasonResourceUpdated, "terminated running operation")
@@ -2515,7 +2576,7 @@ func (s *Server) TerminateOperation(ctx context.Context, termOpReq *application.
 		}
 		log.Warnf("failed to set operation for app %q due to update conflict. retrying again...", *termOpReq.Name)
 		time.Sleep(100 * time.Millisecond)
-		a, err = s.appclientset.ArgoprojV1alpha1().Applications(appNs).Get(ctx, appName, metav1.GetOptions{})
+		a, err = s.appclientset.ArgoprojV1alpha1().Applications(qctx.AppNamespace).Get(ctx, qctx.AppName, metav1.GetOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("error getting application by name: %w", err)
 		}
