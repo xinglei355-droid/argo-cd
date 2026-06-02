@@ -827,7 +827,7 @@ func (s *Server) Get(ctx context.Context, q *application.ApplicationQuery) (*v1a
 
 	app, err := argo.RefreshApp(appIf, appName, refreshType, hydrateType)
 	if err != nil {
-		return nil, fmt.Errorf("error refreshing the app: %w", err)
+		return nil, err
 	}
 
 	if refreshType == v1alpha1.RefreshTypeHard {
@@ -973,12 +973,12 @@ func (s *Server) validateAndUpdateApp(ctx context.Context, newApp *v1alpha1.Appl
 
 	err = s.validateAndNormalizeApp(ctx, newApp, proj, validate)
 	if err != nil {
-		return nil, fmt.Errorf("error validating and normalizing app: %w", err)
+		return nil, err
 	}
 
 	a, err := s.updateApp(ctx, app, newApp, merge)
 	if err != nil {
-		return nil, fmt.Errorf("error updating application: %w", err)
+		return nil, err
 	}
 	return a, nil
 }
@@ -1041,7 +1041,7 @@ func (s *Server) updateApp(ctx context.Context, app *v1alpha1.Application, newAp
 
 		app, err = s.appclientset.ArgoprojV1alpha1().Applications(app.Namespace).Get(ctx, newApp.Name, metav1.GetOptions{})
 		if err != nil {
-			return nil, fmt.Errorf("error getting application: %w", err)
+			return nil, err
 		}
 		s.inferResourcesStatusHealth(app)
 	}
@@ -1082,19 +1082,14 @@ func (s *Server) UpdateSpec(ctx context.Context, q *application.ApplicationUpdat
 	}
 	a, err = s.validateAndUpdateApp(ctx, a, false, validate, rbac.ActionUpdate, q.GetProject())
 	if err != nil {
-		return nil, fmt.Errorf("error validating and updating app: %w", err)
+		return nil, err
 	}
 	return &a.Spec, nil
 }
 
 // Patch patches an application
 func (s *Server) Patch(ctx context.Context, q *application.ApplicationPatchRequest) (*v1alpha1.Application, error) {
-	app, _, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionGet, q.GetProject(), q.GetAppNamespace(), q.GetName(), "")
-	if err != nil {
-		return nil, err
-	}
-
-	err = s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionUpdate, app.RBACName(s.ns))
+	app, _, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionUpdate, q.GetProject(), q.GetAppNamespace(), q.GetName(), "")
 	if err != nil {
 		return nil, err
 	}
@@ -1163,17 +1158,13 @@ func (s *Server) getAppProject(ctx context.Context, a *v1alpha1.Application, log
 func (s *Server) Delete(ctx context.Context, q *application.ApplicationDeleteRequest) (*application.ApplicationResponse, error) {
 	appName := q.GetName()
 	appNs := s.appNamespaceOrDefault(q.GetAppNamespace())
-	a, _, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionGet, q.GetProject(), appNs, appName, "")
+	a, _, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionDelete, q.GetProject(), appNs, appName, "")
 	if err != nil {
 		return nil, err
 	}
 
 	s.projectLock.RLock(a.Spec.Project)
 	defer s.projectLock.RUnlock(a.Spec.Project)
-
-	if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionDelete, a.RBACName(s.ns)); err != nil {
-		return nil, err
-	}
 
 	if q.Cascade != nil && !*q.Cascade && q.GetPropagationPolicy() != "" {
 		return nil, status.Error(codes.InvalidArgument, "cannot set propagation policy when cascading is disabled")
@@ -1218,7 +1209,7 @@ func (s *Server) Delete(ctx context.Context, q *application.ApplicationDeleteReq
 
 	err = s.appclientset.ArgoprojV1alpha1().Applications(appNs).Delete(ctx, appName, metav1.DeleteOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("error deleting application: %w", err)
+		return nil, err
 	}
 	s.logAppEvent(ctx, a, argo.EventReasonResourceDeleted, "deleted application")
 	return &application.ApplicationResponse{}, nil
@@ -2068,7 +2059,7 @@ func isTheSelectedOne(currentNode *v1alpha1.ResourceNode, q *application.Applica
 
 // Sync syncs an application to its target state
 func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncRequest) (*v1alpha1.Application, error) {
-	a, proj, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionGet, syncReq.GetProject(), syncReq.GetAppNamespace(), syncReq.GetName(), "")
+	a, proj, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionSync, syncReq.GetProject(), syncReq.GetAppNamespace(), syncReq.GetName(), "")
 	if err != nil {
 		return nil, err
 	}
@@ -2081,10 +2072,6 @@ func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncR
 	}
 	if !canSync {
 		return a, status.Errorf(codes.PermissionDenied, "cannot sync: blocked by sync window")
-	}
-
-	if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionSync, a.RBACName(s.ns)); err != nil {
-		return nil, err
 	}
 
 	if syncReq.Manifests != nil {
@@ -2164,7 +2151,7 @@ func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncR
 	appIf := s.appclientset.ArgoprojV1alpha1().Applications(appNs)
 	a, err = argo.SetAppOperation(appIf, appName, &op)
 	if err != nil {
-		return nil, fmt.Errorf("error setting app operation: %w", err)
+		return nil, err
 	}
 	partial := ""
 	if len(syncReq.Resources) > 0 {
