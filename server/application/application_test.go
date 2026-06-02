@@ -1157,6 +1157,101 @@ func unsetSyncRunningOperationState(t *testing.T, appServer *Server) {
 	require.NoError(t, err)
 }
 
+func TestGetSyncDeleteErrorHandling(t *testing.T) {
+	// This test verifies that Get, Sync, and Delete return correct error codes for:
+	// 1. Application does not exist (with project specified) - NotFound
+	// 2. User has no RBAC permission - PermissionDenied
+	// 3. Project mismatch (app in different project than specified) - NotFound
+	// 4. Normal access with proper RBAC - Success (no error)
+
+	f := func(enf *rbac.Enforcer) {
+		_ = enf.SetBuiltinPolicy(assets.BuiltinPolicyCSV)
+		enf.SetDefaultRole("role:none")
+	}
+
+	testAppDefault := newTestApp(func(app *v1alpha1.Application) {
+		app.Name = "test-default"
+		app.Spec.Project = "default"
+	})
+	testAppMyProj := newTestApp(func(app *v1alpha1.Application) {
+		app.Name = "test-myproj"
+		app.Spec.Project = "my-proj"
+	})
+
+	appServer := newTestAppServerWithEnforcerConfigure(t, f, map[string]string{}, testAppDefault, testAppMyProj)
+
+	noRoleCtx := t.Context()
+	//nolint:staticcheck
+	adminCtx := context.WithValue(t.Context(), "claims", &jwt.MapClaims{"groups": []string{"admin"}})
+	//nolint:staticcheck
+	userCtxDefault := context.WithValue(t.Context(), "claims", &jwt.MapClaims{"groups": []string{"default-user"}})
+	//nolint:staticcheck
+	userCtxMyProj := context.WithValue(t.Context(), "claims", &jwt.MapClaims{"groups": []string{"myproj-user"}})
+
+	_ = appServer.enf.SetBuiltinPolicy(`
+p, default-user, applications, get, default/*, allow
+p, default-user, applications, sync, default/*, allow
+p, default-user, applications, delete, default/*, allow
+p, myproj-user, applications, get, my-proj/*, allow
+p, myproj-user, applications, sync, my-proj/*, allow
+p, myproj-user, applications, delete, my-proj/*, allow
+`)
+
+	t.Run("Get", func(t *testing.T) {
+		// Scenario 1: Not Found - app doesn't exist, project specified
+		_, err := appServer.Get(adminCtx, &application.ApplicationQuery{Name: new("does-not-exist"), Project: []string{"default"}})
+		assert.Equal(t, codes.NotFound, status.Code(err), "should return NotFound when app doesn't exist and project is specified")
+
+		// Scenario 2: No Permission - user with no RBAC
+		_, err = appServer.Get(noRoleCtx, &application.ApplicationQuery{Name: new("test-default")})
+		assert.Equal(t, codes.PermissionDenied, status.Code(err), "should return PermissionDenied when user has no RBAC")
+
+		// Scenario 3: Project Mismatch - user specifies project "default" but app is in "my-proj"
+		_, err = appServer.Get(userCtxDefault, &application.ApplicationQuery{Name: new("test-myproj"), Project: []string{"default"}})
+		assert.Equal(t, codes.NotFound, status.Code(err), "should return NotFound when app exists but is in a different project")
+
+		// Scenario 4: Normal Access - user with proper RBAC
+		_, err = appServer.Get(userCtxDefault, &application.ApplicationQuery{Name: new("test-default")})
+		assert.NoError(t, err, "should succeed when user has proper RBAC")
+	})
+
+	t.Run("Sync", func(t *testing.T) {
+		// Scenario 1: Not Found - app doesn't exist, project specified
+		_, err := appServer.Sync(adminCtx, &application.ApplicationSyncRequest{Name: new("does-not-exist"), Project: new("default")})
+		assert.Equal(t, codes.NotFound, status.Code(err), "should return NotFound when app doesn't exist and project is specified")
+
+		// Scenario 2: No Permission - user with no RBAC
+		_, err = appServer.Sync(noRoleCtx, &application.ApplicationSyncRequest{Name: new("test-default")})
+		assert.Equal(t, codes.PermissionDenied, status.Code(err), "should return PermissionDenied when user has no RBAC")
+
+		// Scenario 3: Project Mismatch - user specifies project "default" but app is in "my-proj"
+		_, err = appServer.Sync(userCtxDefault, &application.ApplicationSyncRequest{Name: new("test-myproj"), Project: new("default")})
+		assert.Equal(t, codes.NotFound, status.Code(err), "should return NotFound when project mismatches")
+
+		// Scenario 4: Normal Access - user with proper RBAC
+		_, err = appServer.Sync(userCtxDefault, &application.ApplicationSyncRequest{Name: new("test-default"), Project: new("default")})
+		assert.NoError(t, err, "should succeed when user has proper RBAC")
+	})
+
+	t.Run("Delete", func(t *testing.T) {
+		// Scenario 1: Not Found - app doesn't exist, project specified
+		_, err := appServer.Delete(adminCtx, &application.ApplicationDeleteRequest{Name: new("does-not-exist"), Project: new("default")})
+		assert.Equal(t, codes.NotFound, status.Code(err), "should return NotFound when app doesn't exist and project is specified")
+
+		// Scenario 2: No Permission - user with no RBAC
+		_, err = appServer.Delete(noRoleCtx, &application.ApplicationDeleteRequest{Name: new("test-default")})
+		assert.Equal(t, codes.PermissionDenied, status.Code(err), "should return PermissionDenied when user has no RBAC")
+
+		// Scenario 3: Project Mismatch - user specifies project "default" but app is in "my-proj"
+		_, err = appServer.Delete(userCtxDefault, &application.ApplicationDeleteRequest{Name: new("test-myproj"), Project: new("default")})
+		assert.Equal(t, codes.NotFound, status.Code(err), "should return NotFound when project mismatches")
+
+		// Scenario 4: Normal Access - user with proper RBAC
+		_, err = appServer.Delete(userCtxMyProj, &application.ApplicationDeleteRequest{Name: new("test-myproj"), Project: new("my-proj")})
+		assert.NoError(t, err, "should succeed when user has proper RBAC")
+	})
+}
+
 func TestListAppsInNamespaceWithLabels(t *testing.T) {
 	appServer := newTestAppServer(t, newTestApp(func(app *v1alpha1.Application) {
 		app.Name = "App1"

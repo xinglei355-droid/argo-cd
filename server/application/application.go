@@ -212,6 +212,11 @@ func (s *Server) getAppEnforceRBAC(ctx context.Context, action, project, namespa
 			return nil, nil, argocommon.PermissionDeniedAPIError
 		}
 		logCtx.Errorf("failed to get application: %s", err)
+		if project != "" {
+			// The user has already passed the RBAC check for the given project. Return the error as internal
+			// instead of masking it as permission denied.
+			return nil, nil, status.Errorf(codes.Internal, "failed to get application: %s", err)
+		}
 		return nil, nil, argocommon.PermissionDeniedAPIError
 	}
 	// Even if we performed an initial RBAC check (because the request was fully parameterized), we still need to
@@ -1218,6 +1223,9 @@ func (s *Server) Delete(ctx context.Context, q *application.ApplicationDeleteReq
 
 	err = s.appclientset.ArgoprojV1alpha1().Applications(appNs).Delete(ctx, appName, metav1.DeleteOptions{})
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, status.Error(codes.NotFound, apierrors.NewNotFound(schema.GroupResource{Group: "argoproj.io", Resource: "applications"}, appName).Error())
+		}
 		return nil, fmt.Errorf("error deleting application: %w", err)
 	}
 	s.logAppEvent(ctx, a, argo.EventReasonResourceDeleted, "deleted application")
@@ -2077,10 +2085,10 @@ func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncR
 
 	canSync, err := proj.Spec.SyncWindows.Matches(a).CanSync(true, nil)
 	if err != nil {
-		return a, status.Errorf(codes.PermissionDenied, "cannot sync: invalid sync window: %v", err)
+		return nil, status.Errorf(codes.PermissionDenied, "cannot sync: invalid sync window: %v", err)
 	}
 	if !canSync {
-		return a, status.Errorf(codes.PermissionDenied, "cannot sync: blocked by sync window")
+		return nil, status.Errorf(codes.PermissionDenied, "cannot sync: blocked by sync window")
 	}
 
 	if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionSync, a.RBACName(s.ns)); err != nil {
