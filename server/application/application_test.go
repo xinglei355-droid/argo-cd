@@ -5168,3 +5168,149 @@ func TestGetUnstructuredLiveResourceOrAppWithImpersonation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "system:serviceaccount:"+test.FakeDestNamespace+":test-sa", config.Impersonate.UserName)
 }
+
+func TestNewAppGetCtxForQuery_Normal(t *testing.T) {
+	appServer := newTestAppServer(t)
+
+	t.Run("full context with project", func(t *testing.T) {
+		q := &application.ApplicationQuery{
+			Name:         stringp("test-app"),
+			AppNamespace: stringp("custom-ns"),
+		}
+		q.Projects = []string{"my-proj"}
+
+		qc, err := appServer.newAppGetCtxForQuery(q)
+		require.NoError(t, err)
+		assert.Equal(t, "test-app", qc.name)
+		assert.Equal(t, "custom-ns", qc.namespace)
+		assert.Equal(t, "my-proj", qc.project)
+	})
+
+	t.Run("full context with legacy project field", func(t *testing.T) {
+		q := &application.ApplicationQuery{
+			Name:         stringp("test-app"),
+			AppNamespace: stringp("custom-ns"),
+		}
+		q.Project = []string{"legacy-proj"}
+
+		qc, err := appServer.newAppGetCtxForQuery(q)
+		require.NoError(t, err)
+		assert.Equal(t, "test-app", qc.name)
+		assert.Equal(t, "custom-ns", qc.namespace)
+		assert.Equal(t, "legacy-proj", qc.project)
+	})
+
+	t.Run("empty namespace defaults to server namespace", func(t *testing.T) {
+		q := &application.ApplicationQuery{
+			Name: stringp("test-app"),
+		}
+
+		qc, err := appServer.newAppGetCtxForQuery(q)
+		require.NoError(t, err)
+		assert.Equal(t, "test-app", qc.name)
+		assert.Equal(t, "default", qc.namespace)
+		assert.Equal(t, "", qc.project)
+	})
+
+	t.Run("no project specified", func(t *testing.T) {
+		q := &application.ApplicationQuery{
+			Name: stringp("test-app"),
+		}
+
+		qc, err := appServer.newAppGetCtxForQuery(q)
+		require.NoError(t, err)
+		assert.Equal(t, "", qc.project)
+	})
+
+	t.Run("multiple projects causes error", func(t *testing.T) {
+		q := &application.ApplicationQuery{
+			Name: stringp("test-app"),
+		}
+		q.Projects = []string{"proj1", "proj2"}
+
+		_, err := appServer.newAppGetCtxForQuery(q)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "multiple projects specified")
+	})
+}
+
+func TestNewAppGetCtxFromRequest(t *testing.T) {
+	appServer := newTestAppServer(t)
+
+	t.Run("full request context", func(t *testing.T) {
+		qc := appServer.newAppGetCtxFromRequest("my-app", "my-ns", "my-proj")
+		assert.Equal(t, "my-app", qc.name)
+		assert.Equal(t, "my-ns", qc.namespace)
+		assert.Equal(t, "my-proj", qc.project)
+	})
+
+	t.Run("empty namespace defaults to server namespace", func(t *testing.T) {
+		qc := appServer.newAppGetCtxFromRequest("my-app", "", "my-proj")
+		assert.Equal(t, "my-app", qc.name)
+		assert.Equal(t, "default", qc.namespace)
+		assert.Equal(t, "my-proj", qc.project)
+	})
+
+	t.Run("empty project", func(t *testing.T) {
+		qc := appServer.newAppGetCtxFromRequest("my-app", "my-ns", "")
+		assert.Equal(t, "", qc.project)
+	})
+}
+
+func TestAppGetCtx_RBACName(t *testing.T) {
+	qc := &appGetCtx{
+		name:      "my-app",
+		namespace: "my-ns",
+		project:   "my-proj",
+	}
+
+	rbacName := qc.rbacName("argocd")
+	assert.Equal(t, "my-proj/my-ns/my-app", rbacName)
+}
+
+func TestGetApp_CrossProjectRejection(t *testing.T) {
+	testApp := newTestApp(func(app *v1alpha1.Application) {
+		app.Name = "cross-proj-app"
+		app.Spec.Project = "my-proj"
+	})
+
+	appServer := newTestAppServer(t, testApp)
+
+	q := &application.ApplicationQuery{
+		Name: stringp("cross-proj-app"),
+	}
+	q.Projects = []string{"different-proj"}
+
+	qc, err := appServer.newAppGetCtxForQuery(q)
+	require.NoError(t, err)
+	assert.Equal(t, "different-proj", qc.project)
+
+	a, _, err := appServer.getApplicationEnforceRBACInformer(t.Context(), rbac.ActionGet, qc.project, qc.namespace, qc.name)
+	assert.Nil(t, a)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestDeleteApp_EmptyNamespace(t *testing.T) {
+	testApp := newTestApp(func(app *v1alpha1.Application) {
+		app.Name = "test-delete-empty-ns"
+		app.Namespace = "default"
+		app.Spec.Project = "default"
+	})
+	appServer := newTestAppServer(t, testApp)
+
+	req := &application.ApplicationDeleteRequest{
+		Name:         stringp("test-delete-empty-ns"),
+		AppNamespace: stringp(""),
+		Project:      stringp("default"),
+	}
+
+	qc := appServer.newAppGetCtxFromRequest(req.GetName(), req.GetAppNamespace(), req.GetProject())
+	assert.Equal(t, "test-delete-empty-ns", qc.name)
+	assert.Equal(t, "default", qc.namespace)
+	assert.Equal(t, "default", qc.project)
+}
+
+func stringp(s string) *string {
+	return &s
+}
