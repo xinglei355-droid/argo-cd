@@ -1,0 +1,400 @@
+diff --git a/server/application/application.go b/server/application/application.go
+index d3ada7707..c966109a0 100644
+--- a/server/application/application.go
++++ b/server/application/application.go
+@@ -87,6 +87,217 @@ var (
+ 	watchAPIBufferSize = env.ParseNumFromEnv(argocommon.EnvWatchAPIBufferSize, 1000, 0, math.MaxInt32)
+ )
+ 
++// appQueryContext 包含应用查询所需的所有上下文信息
++type appQueryContext struct {
++	ctx            context.Context
++	action         string
++	project        string
++	namespace      string
++	name           string
++	resourceVersion string
++	claims         any
++	subject        string
++}
++
++// appQueryContextBuilder 用于构建 appQueryContext
++type appQueryContextBuilder struct {
++	s              *Server
++	ctx            context.Context
++	action         string
++	queryProject   string
++	queryProjects  []string
++	queryNamespace string
++	queryName      string
++	resourceVersion string
++	allowMultipleProjects bool
++}
++
++// newAppQueryContextBuilder 创建一个新的应用查询上下文构建器
++func (s *Server) newAppQueryContextBuilder(ctx context.Context, action string) *appQueryContextBuilder {
++	return &appQueryContextBuilder{
++		s:      s,
++		ctx:    ctx,
++		action: action,
++	}
++}
++
++// withProjectQuery 设置项目查询参数（单个项目）
++func (b *appQueryContextBuilder) withProjectQuery(project string) *appQueryContextBuilder {
++	b.queryProject = project
++	return b
++}
++
++// withProjectsQuery 设置项目查询参数（多个项目）
++func (b *appQueryContextBuilder) withProjectsQuery(projects []string) *appQueryContextBuilder {
++	b.queryProjects = projects
++	return b
++}
++
++// withNamespaceQuery 设置命名空间查询参数
++func (b *appQueryContextBuilder) withNamespaceQuery(namespace string) *appQueryContextBuilder {
++	b.queryNamespace = namespace
++	return b
++}
++
++// withNameQuery 设置应用名称查询参数
++func (b *appQueryContextBuilder) withNameQuery(name string) *appQueryContextBuilder {
++	b.queryName = name
++	return b
++}
++
++// withResourceVersion 设置资源版本
++func (b *appQueryContextBuilder) withResourceVersion(version string) *appQueryContextBuilder {
++	b.resourceVersion = version
++	return b
++}
++
++// withoutMultipleProjects 禁用多个项目支持（用于 Get 等只允许单个项目的接口）
++func (b *appQueryContextBuilder) withoutMultipleProjects() *appQueryContextBuilder {
++	b.allowMultipleProjects = false
++	return b
++}
++
++// withMultipleProjects 启用多个项目支持
++func (b *appQueryContextBuilder) withMultipleProjects() *appQueryContextBuilder {
++	b.allowMultipleProjects = true
++	return b
++}
++
++// build 构建 appQueryContext
++func (b *appQueryContextBuilder) build() (*appQueryContext, error) {
++	// 验证多个项目
++	if !b.allowMultipleProjects && len(b.queryProjects) > 1 {
++		return nil, status.Errorf(codes.InvalidArgument, "multiple projects specified - this endpoint accepts either zero or one project")
++	}
++
++	// 处理项目：优先使用单个项目，否则从多个项目中取第一个（如果有）
++	project := b.queryProject
++	if project == "" && len(b.queryProjects) > 0 {
++		project = b.queryProjects[0]
++	}
++
++	// 处理命名空间：为空时使用默认命名空间
++	namespace := b.s.appNamespaceOrDefault(b.queryNamespace)
++
++	// 获取 RBAC subject 和 claims
++	claims := b.ctx.Value("claims")
++	subject := session.Username(b.ctx)
++	if subject == "" {
++		subject = "Unknown user"
++	}
++
++	return &appQueryContext{
++		ctx:            b.ctx,
++		action:         b.action,
++		project:        project,
++		namespace:      namespace,
++		name:           b.queryName,
++		resourceVersion: b.resourceVersion,
++		claims:         claims,
++		subject:        subject,
++	}, nil
++}
++
++// getAppInformer 使用 informer 从查询上下文获取应用
++func (c *appQueryContext) getAppInformer(s *Server) (*v1alpha1.Application, *v1alpha1.AppProject, error) {
++	return s.getApplicationEnforceRBACInformer(c.ctx, c.action, c.project, c.namespace, c.name)
++}
++
++// getAppClient 使用 client 从查询上下文获取应用
++func (c *appQueryContext) getAppClient(s *Server) (*v1alpha1.Application, *v1alpha1.AppProject, error) {
++	return s.getApplicationEnforceRBACClient(c.ctx, c.action, c.project, c.namespace, c.name, c.resourceVersion)
++}
++
++// getAppProject 从应用获取项目
++func (c *appQueryContext) getAppProject(s *Server, app *v1alpha1.Application) (*v1alpha1.AppProject, error) {
++	logCtx := log.WithFields(map[string]any{
++		"user":        c.subject,
++		"application": c.name,
++		"namespace":   c.namespace,
++	})
++	return s.getAppProject(c.ctx, app, logCtx)
++}
++
++// getAppFromQuery 使用 ApplicationQuery 构建上下文并获取应用（informer）
++func (s *Server) getAppFromQueryInformer(ctx context.Context, action string, q *application.ApplicationQuery, allowMultipleProjects ...bool) (*v1alpha1.Application, *v1alpha1.AppProject, error) {
++	builder := s.newAppQueryContextBuilder(ctx, action).
++		withProjectQuery(q.GetProject()).
++		withProjectsQuery(getProjectsFromApplicationQuery(*q)).
++		withNamespaceQuery(q.GetAppNamespace()).
++		withNameQuery(q.GetName()).
++		withResourceVersion(q.GetResourceVersion())
++	
++	if len(allowMultipleProjects) > 0 {
++		if allowMultipleProjects[0] {
++			builder.withMultipleProjects()
++		} else {
++			builder.withoutMultipleProjects()
++		}
++	} else {
++		// 默认允许多个项目（与 Get 等接口不同）
++		builder.withMultipleProjects()
++	}
++	
++	queryCtx, err := builder.build()
++	if err != nil {
++		return nil, nil, err
++	}
++	return queryCtx.getAppInformer(s)
++}
++
++// getAppFromQuery 使用 ApplicationQuery 构建上下文并获取应用（client）
++func (s *Server) getAppFromQueryClient(ctx context.Context, action string, q *application.ApplicationQuery, allowMultipleProjects ...bool) (*v1alpha1.Application, *v1alpha1.AppProject, error) {
++	builder := s.newAppQueryContextBuilder(ctx, action).
++		withProjectQuery(q.GetProject()).
++		withProjectsQuery(getProjectsFromApplicationQuery(*q)).
++		withNamespaceQuery(q.GetAppNamespace()).
++		withNameQuery(q.GetName()).
++		withResourceVersion(q.GetResourceVersion())
++	
++	if len(allowMultipleProjects) > 0 {
++		if allowMultipleProjects[0] {
++			builder.withMultipleProjects()
++		} else {
++			builder.withoutMultipleProjects()
++		}
++	} else {
++		// 默认允许多个项目（与 Get 等接口不同）
++		builder.withMultipleProjects()
++	}
++	
++	queryCtx, err := builder.build()
++	if err != nil {
++		return nil, nil, err
++	}
++	return queryCtx.getAppClient(s)
++}
++
++// getAppFromDeleteRequest 使用 ApplicationDeleteRequest 构建上下文并获取应用
++func (s *Server) getAppFromDeleteRequest(ctx context.Context, q *application.ApplicationDeleteRequest) (*v1alpha1.Application, *v1alpha1.AppProject, error) {
++	queryCtx, err := s.newAppQueryContextBuilder(ctx, rbac.ActionGet).
++		withProjectQuery(q.GetProject()).
++		withNamespaceQuery(q.GetAppNamespace()).
++		withNameQuery(q.GetName()).
++		build()
++	if err != nil {
++		return nil, nil, err
++	}
++	return queryCtx.getAppClient(s)
++}
++
++// getAppFromSyncRequest 使用 ApplicationSyncRequest 构建上下文并获取应用
++func (s *Server) getAppFromSyncRequest(ctx context.Context, q *application.ApplicationSyncRequest) (*v1alpha1.Application, *v1alpha1.AppProject, error) {
++	queryCtx, err := s.newAppQueryContextBuilder(ctx, rbac.ActionGet).
++		withProjectQuery(q.GetProject()).
++		withNamespaceQuery(q.GetAppNamespace()).
++		withNameQuery(q.GetName()).
++		build()
++	if err != nil {
++		return nil, nil, err
++	}
++	return queryCtx.getAppClient(s)
++}
++
+ // Server provides an Application service
+ type Server struct {
+ 	ns                     string
+@@ -779,25 +990,17 @@ func (s *Server) GetManifestsWithFiles(stream application.ApplicationService_Get
+ 
+ // Get returns an application by name
+ func (s *Server) Get(ctx context.Context, q *application.ApplicationQuery) (*v1alpha1.Application, error) {
+-	appName := q.GetName()
+-	appNs := s.appNamespaceOrDefault(q.GetAppNamespace())
+-
+-	project := ""
+-	projects := getProjectsFromApplicationQuery(*q)
+-	if len(projects) == 1 {
+-		project = projects[0]
+-	} else if len(projects) > 1 {
+-		return nil, status.Errorf(codes.InvalidArgument, "multiple projects specified - the get endpoint accepts either zero or one project")
+-	}
+-
+ 	// We must use a client Get instead of an informer Get, because it's common to call Get immediately
+ 	// following a Watch (which is not yet powered by an informer), and the Get must reflect what was
+ 	// previously seen by the client.
+-	a, proj, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionGet, project, appNs, appName, q.GetResourceVersion())
++	a, proj, err := s.getAppFromQueryClient(ctx, rbac.ActionGet, q, false)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
++	appNs := a.Namespace
++	appName := a.Name
++
+ 	if q.Refresh == nil {
+ 		s.inferResourcesStatusHealth(a)
+ 		return a.DeepCopy(), nil
+@@ -1161,13 +1364,14 @@ func (s *Server) getAppProject(ctx context.Context, a *v1alpha1.Application, log
+ 
+ // Delete removes an application and all associated resources
+ func (s *Server) Delete(ctx context.Context, q *application.ApplicationDeleteRequest) (*application.ApplicationResponse, error) {
+-	appName := q.GetName()
+-	appNs := s.appNamespaceOrDefault(q.GetAppNamespace())
+-	a, _, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionGet, q.GetProject(), appNs, appName, "")
++	a, _, err := s.getAppFromDeleteRequest(ctx, q)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 
++	appNs := a.Namespace
++	appName := a.Name
++
+ 	s.projectLock.RLock(a.Spec.Project)
+ 	defer s.projectLock.RUnlock(a.Spec.Project)
+ 
+@@ -2068,7 +2272,7 @@ func isTheSelectedOne(currentNode *v1alpha1.ResourceNode, q *application.Applica
+ 
+ // Sync syncs an application to its target state
+ func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncRequest) (*v1alpha1.Application, error) {
+-	a, proj, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionGet, syncReq.GetProject(), syncReq.GetAppNamespace(), syncReq.GetName(), "")
++	a, proj, err := s.getAppFromSyncRequest(ctx, syncReq)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/server/application/application_test.go b/server/application/application_test.go
+index ae9de1d65..4463a35f7 100644
+--- a/server/application/application_test.go
++++ b/server/application/application_test.go
+@@ -5168,3 +5168,116 @@ func TestGetUnstructuredLiveResourceOrAppWithImpersonation(t *testing.T) {
+ 	require.NoError(t, err)
+ 	assert.Equal(t, "system:serviceaccount:"+test.FakeDestNamespace+":test-sa", config.Impersonate.UserName)
+ }
++
++// TestAppQueryContextHelpers tests the new app query context helper functions
++func TestAppQueryContextHelpers(t *testing.T) {
++	t.Parallel()
++
++	// Test 1: Normal query - success
++	t.Run("NormalQuerySuccess", func(t *testing.T) {
++		t.Parallel()
++		testApp := newTestApp()
++		appServer := newTestAppServer(t, testApp)
++		app, _, err := appServer.getAppFromQueryClient(
++			t.Context(),
++			rbac.ActionGet,
++			&application.ApplicationQuery{
++				Name:        &testApp.Name,
++				AppNamespace: &testApp.Namespace,
++				Project:     &testApp.Spec.Project,
++			},
++			false,
++		)
++		require.NoError(t, err)
++		require.NotNil(t, app)
++		assert.Equal(t, testApp.Name, app.Name)
++	})
++
++	// Test 2: Cross-project query - should be rejected
++	t.Run("CrossProjectQueryRejected", func(t *testing.T) {
++		t.Parallel()
++		testApp := newTestApp(func(app *v1alpha1.Application) {
++			app.Spec.Project = "test-project"
++		})
++		testProj := &v1alpha1.AppProject{
++			ObjectMeta: metav1.ObjectMeta{Name: "test-project", Namespace: testNamespace},
++			Spec: v1alpha1.AppProjectSpec{
++				SourceRepos:  []string{"*"},
++				Destinations: []v1alpha1.ApplicationDestination{{Server: "*", Namespace: "*"}},
++			},
++		}
++		appServer := newTestAppServer(t, testApp, testProj)
++		wrongProject := "wrong-project"
++		app, _, err := appServer.getAppFromQueryClient(
++			t.Context(),
++			rbac.ActionGet,
++			&application.ApplicationQuery{
++				Name:        &testApp.Name,
++				AppNamespace: &testApp.Namespace,
++				Project:     &wrongProject,
++			},
++			false,
++		)
++		require.Error(t, err)
++		require.Nil(t, app)
++	})
++
++	// Test 3: Empty namespace - should be handled correctly
++	t.Run("EmptyNamespace", func(t *testing.T) {
++		t.Parallel()
++		testApp := newTestApp(func(app *v1alpha1.Application) {
++			app.Namespace = testNamespace
++		})
++		appServer := newTestAppServer(t, testApp)
++		emptyNamespace := ""
++		app, _, err := appServer.getAppFromQueryClient(
++			t.Context(),
++			rbac.ActionGet,
++			&application.ApplicationQuery{
++				Name:        &testApp.Name,
++				AppNamespace: &emptyNamespace,
++				Project:     &testApp.Spec.Project,
++			},
++			false,
++		)
++		require.NoError(t, err)
++		require.NotNil(t, app)
++		assert.Equal(t, testApp.Name, app.Name)
++	})
++
++	// Test 4: getAppFromSyncRequest - sync
++	t.Run("SyncRequest", func(t *testing.T) {
++		t.Parallel()
++		testApp := newTestApp()
++		appServer := newTestAppServer(t, testApp)
++		app, _, err := appServer.getAppFromSyncRequest(
++			t.Context(),
++			&application.ApplicationSyncRequest{
++				Name:        &testApp.Name,
++				AppNamespace: &testApp.Namespace,
++				Project:     &testApp.Spec.Project,
++			},
++		)
++		require.NoError(t, err)
++		require.NotNil(t, app)
++		assert.Equal(t, testApp.Name, app.Name)
++	})
++
++	// Test 5: getAppFromDeleteRequest - delete
++	t.Run("DeleteRequest", func(t *testing.T) {
++		t.Parallel()
++		testApp := newTestApp()
++		appServer := newTestAppServer(t, testApp)
++		app, _, err := appServer.getAppFromDeleteRequest(
++			t.Context(),
++			&application.ApplicationDeleteRequest{
++				Name:        &testApp.Name,
++				AppNamespace: &testApp.Namespace,
++				Project:     &testApp.Spec.Project,
++			},
++		)
++		require.NoError(t, err)
++		require.NotNil(t, app)
++		assert.Equal(t, testApp.Name, app.Name)
++	})
++}

@@ -5168,3 +5168,116 @@ func TestGetUnstructuredLiveResourceOrAppWithImpersonation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "system:serviceaccount:"+test.FakeDestNamespace+":test-sa", config.Impersonate.UserName)
 }
+
+// TestAppQueryContextHelpers tests the new app query context helper functions
+func TestAppQueryContextHelpers(t *testing.T) {
+	t.Parallel()
+
+	// Test 1: Normal query - success
+	t.Run("NormalQuerySuccess", func(t *testing.T) {
+		t.Parallel()
+		testApp := newTestApp()
+		appServer := newTestAppServer(t, testApp)
+		app, _, err := appServer.getAppFromQueryClient(
+			t.Context(),
+			rbac.ActionGet,
+			&application.ApplicationQuery{
+				Name:        &testApp.Name,
+				AppNamespace: &testApp.Namespace,
+				Project:     &testApp.Spec.Project,
+			},
+			false,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, app)
+		assert.Equal(t, testApp.Name, app.Name)
+	})
+
+	// Test 2: Cross-project query - should be rejected
+	t.Run("CrossProjectQueryRejected", func(t *testing.T) {
+		t.Parallel()
+		testApp := newTestApp(func(app *v1alpha1.Application) {
+			app.Spec.Project = "test-project"
+		})
+		testProj := &v1alpha1.AppProject{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-project", Namespace: testNamespace},
+			Spec: v1alpha1.AppProjectSpec{
+				SourceRepos:  []string{"*"},
+				Destinations: []v1alpha1.ApplicationDestination{{Server: "*", Namespace: "*"}},
+			},
+		}
+		appServer := newTestAppServer(t, testApp, testProj)
+		wrongProject := "wrong-project"
+		app, _, err := appServer.getAppFromQueryClient(
+			t.Context(),
+			rbac.ActionGet,
+			&application.ApplicationQuery{
+				Name:        &testApp.Name,
+				AppNamespace: &testApp.Namespace,
+				Project:     &wrongProject,
+			},
+			false,
+		)
+		require.Error(t, err)
+		require.Nil(t, app)
+	})
+
+	// Test 3: Empty namespace - should be handled correctly
+	t.Run("EmptyNamespace", func(t *testing.T) {
+		t.Parallel()
+		testApp := newTestApp(func(app *v1alpha1.Application) {
+			app.Namespace = testNamespace
+		})
+		appServer := newTestAppServer(t, testApp)
+		emptyNamespace := ""
+		app, _, err := appServer.getAppFromQueryClient(
+			t.Context(),
+			rbac.ActionGet,
+			&application.ApplicationQuery{
+				Name:        &testApp.Name,
+				AppNamespace: &emptyNamespace,
+				Project:     &testApp.Spec.Project,
+			},
+			false,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, app)
+		assert.Equal(t, testApp.Name, app.Name)
+	})
+
+	// Test 4: getAppFromSyncRequest - sync
+	t.Run("SyncRequest", func(t *testing.T) {
+		t.Parallel()
+		testApp := newTestApp()
+		appServer := newTestAppServer(t, testApp)
+		app, _, err := appServer.getAppFromSyncRequest(
+			t.Context(),
+			&application.ApplicationSyncRequest{
+				Name:        &testApp.Name,
+				AppNamespace: &testApp.Namespace,
+				Project:     &testApp.Spec.Project,
+			},
+		)
+		require.NoError(t, err)
+		require.NotNil(t, app)
+		assert.Equal(t, testApp.Name, app.Name)
+	})
+
+	// Test 5: getAppFromDeleteRequest - delete
+	t.Run("DeleteRequest", func(t *testing.T) {
+		t.Parallel()
+		testApp := newTestApp()
+		appServer := newTestAppServer(t, testApp)
+		app, _, err := appServer.getAppFromDeleteRequest(
+			t.Context(),
+			&application.ApplicationDeleteRequest{
+				Name:        &testApp.Name,
+				AppNamespace: &testApp.Namespace,
+				Project:     &testApp.Spec.Project,
+			},
+		)
+		require.NoError(t, err)
+		require.NotNil(t, app)
+		assert.Equal(t, testApp.Name, app.Name)
+	})
+}
