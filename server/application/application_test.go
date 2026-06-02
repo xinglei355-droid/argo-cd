@@ -836,6 +836,8 @@ func TestNoAppEnumeration(t *testing.T) {
 		require.EqualError(t, err, common.PermissionDeniedAPIError.Error(), "error message must be _only_ the permission error, to avoid leaking information about app existence")
 		_, err = appServer.Get(adminCtx, &application.ApplicationQuery{Name: new("doest-not-exist"), Project: []string{"test"}})
 		assert.EqualError(t, err, "rpc error: code = NotFound desc = applications.argoproj.io \"doest-not-exist\" not found", "when the request specifies a project, we can return the standard k8s error message")
+		_, err = appServer.Get(adminCtx, &application.ApplicationQuery{Name: new("test"), Project: []string{"wrong-project"}})
+		assert.EqualError(t, err, "rpc error: code = NotFound desc = applications.argoproj.io \"test\" not found", "when the request specifies a project and it mismatches, we return the standard k8s error message")
 	})
 
 	t.Run("GetManifests", func(t *testing.T) {
@@ -984,6 +986,25 @@ func TestNoAppEnumeration(t *testing.T) {
 		require.EqualError(t, err, common.PermissionDeniedAPIError.Error(), "error message must be _only_ the permission error, to avoid leaking information about app existence")
 		_, err = appServer.Sync(adminCtx, &application.ApplicationSyncRequest{Name: new("doest-not-exist"), Project: new("test")})
 		assert.EqualError(t, err, "rpc error: code = NotFound desc = applications.argoproj.io \"doest-not-exist\" not found", "when the request specifies a project, we can return the standard k8s error message")
+		_, err = appServer.Sync(adminCtx, &application.ApplicationSyncRequest{Name: new("test"), Project: new("wrong-project")})
+		assert.EqualError(t, err, "rpc error: code = NotFound desc = applications.argoproj.io \"test\" not found", "when the request specifies a project and it mismatches, we return the standard k8s error message")
+	})
+
+	t.Run("Delete", func(t *testing.T) {
+		_, _ = appServer.Create(adminCtx, &application.ApplicationCreateRequest{Application: &v1alpha1.Application{ObjectMeta: metav1.ObjectMeta{Name: "test-delete"}, Spec: v1alpha1.ApplicationSpec{Project: "default"}}})
+		
+		// Use cascade=false to avoid finalizer patch in tests
+		falseVar := false
+		_, err := appServer.Delete(adminCtx, &application.ApplicationDeleteRequest{Name: new("test-delete"), Cascade: &falseVar})
+		require.NoError(t, err)
+		_, err = appServer.Delete(noRoleCtx, &application.ApplicationDeleteRequest{Name: new("test"), Cascade: &falseVar})
+		require.EqualError(t, err, common.PermissionDeniedAPIError.Error(), "error message must be _only_ the permission error, to avoid leaking information about app existence")
+		_, err = appServer.Delete(adminCtx, &application.ApplicationDeleteRequest{Name: new("doest-not-exist"), Cascade: &falseVar})
+		require.EqualError(t, err, common.PermissionDeniedAPIError.Error(), "error message must be _only_ the permission error, to avoid leaking information about app existence")
+		_, err = appServer.Delete(adminCtx, &application.ApplicationDeleteRequest{Name: new("doest-not-exist"), Project: new("test"), Cascade: &falseVar})
+		assert.EqualError(t, err, "rpc error: code = NotFound desc = applications.argoproj.io \"doest-not-exist\" not found", "when the request specifies a project, we can return the standard k8s error message")
+		_, err = appServer.Delete(adminCtx, &application.ApplicationDeleteRequest{Name: new("test"), Project: new("wrong-project"), Cascade: &falseVar})
+		assert.EqualError(t, err, "rpc error: code = NotFound desc = applications.argoproj.io \"test\" not found", "when the request specifies a project and it mismatches, we return the standard k8s error message")
 	})
 
 	t.Run("TerminateOperation", func(t *testing.T) {
