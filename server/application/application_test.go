@@ -5168,3 +5168,229 @@ func TestGetUnstructuredLiveResourceOrAppWithImpersonation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "system:serviceaccount:"+test.FakeDestNamespace+":test-sa", config.Impersonate.UserName)
 }
+
+func TestGetApp_ResourceNotFound(t *testing.T) {
+	ctx := t.Context()
+	appServer := newTestAppServer(t)
+
+	appName := "non-existent-app"
+	_, err := appServer.Get(ctx, &application.ApplicationQuery{Name: &appName})
+	require.Error(t, err)
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.PermissionDenied, st.Code())
+	assert.Contains(t, st.Message(), "permission denied")
+}
+
+func TestGetApp_ResourceNotFound_WithProject(t *testing.T) {
+	ctx := t.Context()
+	appServer := newTestAppServer(t)
+
+	appName := "non-existent-app"
+	project := "default"
+	_, err := appServer.Get(ctx, &application.ApplicationQuery{Name: &appName, Projects: []string{project}})
+	require.Error(t, err)
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.NotFound, st.Code())
+}
+
+func TestGetApp_RBACDenied(t *testing.T) {
+	ctx := t.Context()
+
+	f := func(enf *rbac.Enforcer) {
+		_ = enf.SetBuiltinPolicy(assets.BuiltinPolicyCSV)
+		enf.SetDefaultRole("role:readonly")
+	}
+
+	app := newTestApp()
+	appServer := newTestAppServerWithEnforcerConfigure(t, f, map[string]string{}, app)
+
+	_, err := appServer.Get(ctx, &application.ApplicationQuery{Name: &app.Name})
+	require.Error(t, err)
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.PermissionDenied, st.Code())
+	assert.Contains(t, st.Message(), "permission denied")
+}
+
+func TestGetApp_ProjectMismatch(t *testing.T) {
+	ctx := t.Context()
+
+	app := newTestApp(func(a *v1alpha1.Application) {
+		a.Spec.Project = "my-proj"
+	})
+
+	myProj := &v1alpha1.AppProject{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-proj", Namespace: "default"},
+		Spec: v1alpha1.AppProjectSpec{
+			SourceRepos:  []string{"*"},
+			Destinations: []v1alpha1.ApplicationDestination{{Server: "*", Namespace: "*"}},
+		},
+	}
+
+	appServer := newTestAppServer(t, app, myProj)
+
+	wrongProject := "default"
+	_, err := appServer.Get(ctx, &application.ApplicationQuery{Name: &app.Name, Projects: []string{wrongProject}})
+	require.Error(t, err)
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.NotFound, st.Code())
+}
+
+func TestGetApp_NormalAccess(t *testing.T) {
+	ctx := t.Context()
+
+	app := newTestApp()
+	appServer := newTestAppServer(t, app)
+
+	result, err := appServer.Get(ctx, &application.ApplicationQuery{Name: &app.Name})
+	require.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.Equal(t, app.Name, result.Name)
+	assert.Equal(t, app.Spec.Project, result.Spec.Project)
+}
+
+func TestDeleteApp_ResourceNotFound(t *testing.T) {
+	ctx := t.Context()
+	appServer := newTestAppServer(t)
+
+	appName := "non-existent-app"
+	_, err := appServer.Delete(ctx, &application.ApplicationDeleteRequest{Name: &appName})
+	require.Error(t, err)
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.PermissionDenied, st.Code())
+}
+
+func TestDeleteApp_RBACDenied(t *testing.T) {
+	ctx := t.Context()
+
+	f := func(enf *rbac.Enforcer) {
+		_ = enf.SetBuiltinPolicy(assets.BuiltinPolicyCSV)
+		enf.SetDefaultRole("role:readonly")
+	}
+
+	app := newTestApp()
+	appServer := newTestAppServerWithEnforcerConfigure(t, f, map[string]string{}, app)
+
+	_, err := appServer.Delete(ctx, &application.ApplicationDeleteRequest{Name: &app.Name})
+	require.Error(t, err)
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.PermissionDenied, st.Code())
+}
+
+func TestDeleteApp_ProjectMismatch(t *testing.T) {
+	ctx := t.Context()
+
+	app := newTestApp(func(a *v1alpha1.Application) {
+		a.Spec.Project = "my-proj"
+	})
+
+	myProj := &v1alpha1.AppProject{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-proj", Namespace: "default"},
+		Spec: v1alpha1.AppProjectSpec{
+			SourceRepos:  []string{"*"},
+			Destinations: []v1alpha1.ApplicationDestination{{Server: "*", Namespace: "*"}},
+		},
+	}
+
+	appServer := newTestAppServer(t, app, myProj)
+
+	wrongProject := "default"
+	_, err := appServer.Delete(ctx, &application.ApplicationDeleteRequest{Name: &app.Name, Project: &wrongProject})
+	require.Error(t, err)
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.NotFound, st.Code())
+}
+
+func TestDeleteApp_NormalAccess(t *testing.T) {
+	ctx := t.Context()
+
+	app := newTestApp()
+	appServer := newTestAppServer(t, app)
+
+	fakeAppCs := appServer.appclientset.(*deepCopyAppClientset).GetUnderlyingClientSet().(*apps.Clientset)
+	fakeAppCs.ReactionChain = nil
+	fakeAppCs.AddReactor("patch", "applications", func(_ kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+		return true, nil, nil
+	})
+	fakeAppCs.AddReactor("delete", "applications", func(_ kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+		return true, nil, nil
+	})
+	fakeAppCs.AddReactor("get", "applications", func(_ kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+		return true, app.DeepCopy(), nil
+	})
+	appServer.appclientset = fakeAppCs
+
+	_, err := appServer.Delete(ctx, &application.ApplicationDeleteRequest{Name: &app.Name})
+	require.NoError(t, err)
+}
+
+func TestSyncApp_ResourceNotFound(t *testing.T) {
+	ctx := t.Context()
+	appServer := newTestAppServer(t)
+
+	appName := "non-existent-app"
+	_, err := appServer.Sync(ctx, &application.ApplicationSyncRequest{Name: &appName})
+	require.Error(t, err)
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.PermissionDenied, st.Code())
+}
+
+func TestSyncApp_RBACDenied(t *testing.T) {
+	ctx := t.Context()
+
+	f := func(enf *rbac.Enforcer) {
+		_ = enf.SetBuiltinPolicy(assets.BuiltinPolicyCSV)
+		enf.SetDefaultRole("role:readonly")
+	}
+
+	app := newTestApp()
+	appServer := newTestAppServerWithEnforcerConfigure(t, f, map[string]string{}, app)
+
+	_, err := appServer.Sync(ctx, &application.ApplicationSyncRequest{Name: &app.Name})
+	require.Error(t, err)
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.PermissionDenied, st.Code())
+}
+
+func TestSyncApp_ProjectMismatch(t *testing.T) {
+	ctx := t.Context()
+
+	app := newTestApp(func(a *v1alpha1.Application) {
+		a.Spec.Project = "my-proj"
+	})
+
+	myProj := &v1alpha1.AppProject{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-proj", Namespace: "default"},
+		Spec: v1alpha1.AppProjectSpec{
+			SourceRepos:  []string{"*"},
+			Destinations: []v1alpha1.ApplicationDestination{{Server: "*", Namespace: "*"}},
+		},
+	}
+
+	appServer := newTestAppServer(t, app, myProj)
+
+	wrongProject := "default"
+	_, err := appServer.Sync(ctx, &application.ApplicationSyncRequest{Name: &app.Name, Project: &wrongProject})
+	require.Error(t, err)
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.NotFound, st.Code())
+}
+
+func TestSyncApp_NormalAccess(t *testing.T) {
+	ctx := t.Context()
+
+	app := newTestApp()
+	appServer := newTestAppServer(t, app)
+
+	_, err := appServer.Sync(ctx, &application.ApplicationSyncRequest{Name: &app.Name})
+	require.NoError(t, err)
+}

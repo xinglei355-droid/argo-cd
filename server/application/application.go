@@ -211,8 +211,12 @@ func (s *Server) getAppEnforceRBAC(ctx context.Context, action, project, namespa
 			logCtx.Warn("application does not exist")
 			return nil, nil, argocommon.PermissionDeniedAPIError
 		}
+		if security.IsNamespaceNotPermittedError(err) {
+			logCtx.Warn("namespace not permitted")
+			return nil, nil, status.Error(codes.PermissionDenied, "namespace not permitted")
+		}
 		logCtx.Errorf("failed to get application: %s", err)
-		return nil, nil, argocommon.PermissionDeniedAPIError
+		return nil, nil, status.Errorf(codes.Internal, "failed to get application")
 	}
 	// Even if we performed an initial RBAC check (because the request was fully parameterized), we still need to
 	// perform a second RBAC check to ensure that the user has access to the actual Application's project (not just the
