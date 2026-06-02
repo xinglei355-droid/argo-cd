@@ -5168,3 +5168,40 @@ func TestGetUnstructuredLiveResourceOrAppWithImpersonation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "system:serviceaccount:"+test.FakeDestNamespace+":test-sa", config.Impersonate.UserName)
 }
+
+func TestConstructApplicationQueryContext(t *testing.T) {
+	s := &Server{
+		ns: "argocd",
+	}
+
+	t.Run("Normal query", func(t *testing.T) {
+		ctx := context.WithValue(context.Background(), "claims", "my-claims")
+		ctx = session.WithUsername(ctx, "admin")
+		qc, err := s.constructApplicationQueryContext(ctx, "my-app", "my-ns", "my-project", []string{"my-project"})
+		assert.NoError(t, err)
+		assert.Equal(t, "my-app", qc.name)
+		assert.Equal(t, "my-ns", qc.appNamespace)
+		assert.Equal(t, "my-project", qc.project)
+		assert.Equal(t, "my-claims", qc.rbacSubject)
+		assert.Equal(t, "admin", qc.requestSource)
+	})
+
+	t.Run("Cross project query rejected", func(t *testing.T) {
+		ctx := context.Background()
+		qc, err := s.constructApplicationQueryContext(ctx, "my-app", "my-ns", "", []string{"proj1", "proj2"})
+		assert.Error(t, err)
+		assert.Nil(t, qc)
+		assert.Equal(t, codes.InvalidArgument, status.Code(err))
+		assert.Contains(t, err.Error(), "multiple projects specified")
+	})
+
+	t.Run("Empty namespace uses default", func(t *testing.T) {
+		ctx := context.Background()
+		qc, err := s.constructApplicationQueryContext(ctx, "my-app", "", "my-project", nil)
+		assert.NoError(t, err)
+		assert.Equal(t, "my-app", qc.name)
+		assert.Equal(t, "argocd", qc.appNamespace)
+		assert.Equal(t, "my-project", qc.project)
+		assert.Equal(t, "Unknown user", qc.requestSource)
+	})
+}
