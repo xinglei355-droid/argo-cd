@@ -2566,3 +2566,109 @@ func Test_EvaluateAppRevisionsChanges(t *testing.T) {
 		})
 	}
 }
+
+func TestCompareAppState_Synced(t *testing.T) {
+	t.Parallel()
+
+	app := newFakeApp()
+	pod := NewPod()
+	pod.SetNamespace(test.FakeDestNamespace)
+	key := kube.ResourceKey{Group: "", Kind: "Pod", Namespace: test.FakeDestNamespace, Name: app.Name}
+	data := fakeData{
+		apps: []runtime.Object{app},
+		manifestResponse: &apiclient.ManifestResponse{
+			Manifests: []string{PodManifest},
+			Namespace: test.FakeDestNamespace,
+			Server:    test.FakeClusterURL,
+			Revision:  "abc123",
+		},
+		managedLiveObjs: map[kube.ResourceKey]*unstructured.Unstructured{
+			key: pod,
+		},
+	}
+	ctrl := newFakeController(t.Context(), &data, nil)
+	sources := make([]v1alpha1.ApplicationSource, 0)
+	sources = append(sources, app.Spec.GetSource())
+	revisions := make([]string, 0)
+	revisions = append(revisions, "")
+	compRes, err := ctrl.appStateManager.CompareAppState(app, &defaultProj, revisions, sources, false, false, nil, false)
+	require.NoError(t, err)
+	assert.NotNil(t, compRes)
+	assert.NotNil(t, compRes.syncStatus)
+	assert.Equal(t, v1alpha1.SyncStatusCodeSynced, compRes.syncStatus.Status)
+	assert.Len(t, compRes.resources, 1)
+	assert.Equal(t, v1alpha1.SyncStatusCodeSynced, compRes.resources[0].Status)
+	assert.Len(t, compRes.managedResources, 1)
+	assert.Empty(t, app.Status.Conditions)
+}
+
+func TestCompareAppState_OutOfSync(t *testing.T) {
+	t.Parallel()
+
+	app := newFakeApp()
+	data := fakeData{
+		apps: []runtime.Object{app},
+		manifestResponse: &apiclient.ManifestResponse{
+			Manifests: []string{PodManifest},
+			Namespace: test.FakeDestNamespace,
+			Server:    test.FakeClusterURL,
+			Revision:  "abc123",
+		},
+		managedLiveObjs: make(map[kube.ResourceKey]*unstructured.Unstructured),
+	}
+	ctrl := newFakeController(t.Context(), &data, nil)
+	sources := make([]v1alpha1.ApplicationSource, 0)
+	sources = append(sources, app.Spec.GetSource())
+	revisions := make([]string, 0)
+	revisions = append(revisions, "")
+	compRes, err := ctrl.appStateManager.CompareAppState(app, &defaultProj, revisions, sources, false, false, nil, false)
+	require.NoError(t, err)
+	assert.NotNil(t, compRes)
+	assert.NotNil(t, compRes.syncStatus)
+	assert.Equal(t, v1alpha1.SyncStatusCodeOutOfSync, compRes.syncStatus.Status)
+	assert.Len(t, compRes.resources, 1)
+	assert.Equal(t, v1alpha1.SyncStatusCodeOutOfSync, compRes.resources[0].Status)
+	assert.Len(t, compRes.managedResources, 1)
+	assert.NotNil(t, compRes.diffResultList)
+	assert.Len(t, compRes.diffResultList.Diffs, 1)
+	assert.True(t, compRes.diffResultList.Diffs[0].Modified)
+	assert.Empty(t, app.Status.Conditions)
+}
+
+func TestCompareAppState_ComparisonError(t *testing.T) {
+	t.Parallel()
+
+	app := newFakeApp()
+	data := fakeData{
+		apps: []runtime.Object{app},
+		manifestResponse: &apiclient.ManifestResponse{
+			Manifests: []string{"---\ninvalid yaml: [bad"},
+			Namespace: test.FakeDestNamespace,
+			Server:    test.FakeClusterURL,
+			Revision:  "abc123",
+		},
+		managedLiveObjs: make(map[kube.ResourceKey]*unstructured.Unstructured),
+	}
+	ctrl := newFakeController(t.Context(), &data, nil)
+	sources := make([]v1alpha1.ApplicationSource, 0)
+	sources = append(sources, app.Spec.GetSource())
+	revisions := make([]string, 0)
+	revisions = append(revisions, "")
+	compRes, err := ctrl.appStateManager.CompareAppState(app, &defaultProj, revisions, sources, false, false, nil, false)
+	require.NoError(t, err)
+	assert.NotNil(t, compRes)
+	assert.NotNil(t, compRes.syncStatus)
+	assert.Equal(t, v1alpha1.SyncStatusCodeUnknown, compRes.syncStatus.Status)
+	assert.Len(t, compRes.resources, 0)
+	assert.Len(t, compRes.managedResources, 0)
+	assert.NotEmpty(t, app.Status.Conditions)
+	hasComparisonError := false
+	for _, cond := range app.Status.Conditions {
+		if cond.Type == v1alpha1.ApplicationConditionComparisonError {
+			hasComparisonError = true
+			assert.Contains(t, cond.Message, "Failed to load target state")
+			break
+		}
+	}
+	assert.True(t, hasComparisonError, "expected a ComparisonError condition to be set")
+}
