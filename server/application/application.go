@@ -1163,17 +1163,13 @@ func (s *Server) getAppProject(ctx context.Context, a *v1alpha1.Application, log
 func (s *Server) Delete(ctx context.Context, q *application.ApplicationDeleteRequest) (*application.ApplicationResponse, error) {
 	appName := q.GetName()
 	appNs := s.appNamespaceOrDefault(q.GetAppNamespace())
-	a, _, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionGet, q.GetProject(), appNs, appName, "")
+	a, _, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionDelete, q.GetProject(), appNs, appName, "")
 	if err != nil {
 		return nil, err
 	}
 
 	s.projectLock.RLock(a.Spec.Project)
 	defer s.projectLock.RUnlock(a.Spec.Project)
-
-	if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionDelete, a.RBACName(s.ns)); err != nil {
-		return nil, err
-	}
 
 	if q.Cascade != nil && !*q.Cascade && q.GetPropagationPolicy() != "" {
 		return nil, status.Error(codes.InvalidArgument, "cannot set propagation policy when cascading is disabled")
@@ -2068,7 +2064,7 @@ func isTheSelectedOne(currentNode *v1alpha1.ResourceNode, q *application.Applica
 
 // Sync syncs an application to its target state
 func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncRequest) (*v1alpha1.Application, error) {
-	a, proj, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionGet, syncReq.GetProject(), syncReq.GetAppNamespace(), syncReq.GetName(), "")
+	a, proj, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionSync, syncReq.GetProject(), syncReq.GetAppNamespace(), syncReq.GetName(), "")
 	if err != nil {
 		return nil, err
 	}
@@ -2081,10 +2077,6 @@ func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncR
 	}
 	if !canSync {
 		return a, status.Errorf(codes.PermissionDenied, "cannot sync: blocked by sync window")
-	}
-
-	if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionSync, a.RBACName(s.ns)); err != nil {
-		return nil, err
 	}
 
 	if syncReq.Manifests != nil {

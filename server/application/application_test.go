@@ -1133,7 +1133,198 @@ func TestNoAppEnumeration(t *testing.T) {
 	})
 }
 
-// setSyncRunningOperationState simulates starting a sync operation on the given app.
+func newApplicationActionTestProject(name string) *v1alpha1.AppProject {
+	return &v1alpha1.AppProject{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+		Spec: v1alpha1.AppProjectSpec{
+			SourceRepos:  []string{"*"},
+			Destinations: []v1alpha1.ApplicationDestination{{Server: "*", Namespace: "*"}},
+		},
+	}
+}
+
+func newApplicationActionTestServer(t *testing.T, policy string, objects ...runtime.Object) *Server {
+	t.Helper()
+	return newTestAppServerWithEnforcerConfigure(t, func(enf *rbac.Enforcer) {
+		enf.SetDefaultRole("")
+		_ = enf.SetBuiltinPolicy(policy)
+	}, map[string]string{}, objects...)
+}
+
+func newClaimsContext(ctx context.Context, subject string) context.Context {
+	return context.WithValue(ctx, "claims", &jwt.RegisteredClaims{Subject: subject})
+}
+
+func TestApplicationGetErrorPaths(t *testing.T) {
+	const (
+		appName       = "sensitive-app"
+		actualProject = "secret-project"
+		wrongProject  = "other-project"
+		reader        = "reader"
+	)
+
+	app := newTestApp(func(a *v1alpha1.Application) {
+		a.Name = appName
+		a.Namespace = testNamespace
+		a.Spec.Project = actualProject
+	})
+
+	newServer := func(policy string) *Server {
+		return newApplicationActionTestServer(t, policy, newApplicationActionTestProject(actualProject), app.DeepCopy())
+	}
+
+	t.Run("not found", func(t *testing.T) {
+		server := newServer("p, reader, applications, get, secret-project/missing-app, allow")
+		name := "missing-app"
+		_, err := server.Get(newClaimsContext(t.Context(), reader), &application.ApplicationQuery{Name: &name, Project: []string{actualProject}})
+		require.EqualError(t, err, "rpc error: code = NotFound desc = applications.argoproj.io \"missing-app\" not found")
+		assert.Equal(t, codes.NotFound, status.Code(err))
+	})
+
+	t.Run("permission denied", func(t *testing.T) {
+		server := newServer("")
+		name := appName
+		_, err := server.Get(newClaimsContext(t.Context(), "no-access"), &application.ApplicationQuery{Name: &name})
+		require.EqualError(t, err, common.PermissionDeniedAPIError.Error())
+		assert.Equal(t, codes.PermissionDenied, status.Code(err))
+		assert.NotContains(t, err.Error(), actualProject)
+	})
+
+	t.Run("project mismatch", func(t *testing.T) {
+		server := newServer("p, reader, applications, get, secret-project/sensitive-app, allow\np, reader, applications, get, other-project/sensitive-app, allow")
+		name := appName
+		_, err := server.Get(newClaimsContext(t.Context(), reader), &application.ApplicationQuery{Name: &name, Project: []string{wrongProject}})
+		require.EqualError(t, err, "rpc error: code = NotFound desc = applications.argoproj.io \"sensitive-app\" not found")
+		assert.Equal(t, codes.NotFound, status.Code(err))
+		assert.NotContains(t, err.Error(), actualProject)
+	})
+
+	t.Run("normal access", func(t *testing.T) {
+		server := newServer("p, reader, applications, get, secret-project/sensitive-app, allow")
+		name := appName
+		got, err := server.Get(newClaimsContext(t.Context(), reader), &application.ApplicationQuery{Name: &name, Project: []string{actualProject}})
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, appName, got.Name)
+		assert.Equal(t, actualProject, got.Spec.Project)
+	})
+}
+
+func TestApplicationSyncErrorPaths(t *testing.T) {
+	const (
+		appName       = "sensitive-app"
+		actualProject = "secret-project"
+		wrongProject  = "other-project"
+		syncer        = "syncer"
+		viewer        = "viewer"
+	)
+
+	app := newTestApp(func(a *v1alpha1.Application) {
+		a.Name = appName
+		a.Namespace = testNamespace
+		a.Spec.Project = actualProject
+	})
+
+	newServer := func(policy string) *Server {
+		return newApplicationActionTestServer(t, policy, newApplicationActionTestProject(actualProject), app.DeepCopy())
+	}
+
+	t.Run("not found", func(t *testing.T) {
+		server := newServer("p, syncer, applications, sync, secret-project/missing-app, allow")
+		name := "missing-app"
+		project := actualProject
+		_, err := server.Sync(newClaimsContext(t.Context(), syncer), &application.ApplicationSyncRequest{Name: &name, Project: &project})
+		require.EqualError(t, err, "rpc error: code = NotFound desc = applications.argoproj.io \"missing-app\" not found")
+		assert.Equal(t, codes.NotFound, status.Code(err))
+	})
+
+	t.Run("permission denied", func(t *testing.T) {
+		server := newServer("p, viewer, applications, get, secret-project/sensitive-app, allow")
+		name := appName
+		_, err := server.Sync(newClaimsContext(t.Context(), viewer), &application.ApplicationSyncRequest{Name: &name})
+		require.EqualError(t, err, common.PermissionDeniedAPIError.Error())
+		assert.Equal(t, codes.PermissionDenied, status.Code(err))
+		assert.NotContains(t, err.Error(), actualProject)
+	})
+
+	t.Run("project mismatch", func(t *testing.T) {
+		server := newServer("p, syncer, applications, sync, secret-project/sensitive-app, allow\np, syncer, applications, sync, other-project/sensitive-app, allow")
+		name := appName
+		project := wrongProject
+		_, err := server.Sync(newClaimsContext(t.Context(), syncer), &application.ApplicationSyncRequest{Name: &name, Project: &project})
+		require.EqualError(t, err, "rpc error: code = NotFound desc = applications.argoproj.io \"sensitive-app\" not found")
+		assert.Equal(t, codes.NotFound, status.Code(err))
+		assert.NotContains(t, err.Error(), actualProject)
+	})
+
+	t.Run("normal access", func(t *testing.T) {
+		server := newServer("p, syncer, applications, sync, secret-project/sensitive-app, allow")
+		name := appName
+		got, err := server.Sync(newClaimsContext(t.Context(), syncer), &application.ApplicationSyncRequest{Name: &name})
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		require.NotNil(t, got.Operation)
+		assert.Equal(t, appName, got.Name)
+	})
+}
+
+func TestApplicationDeleteErrorPaths(t *testing.T) {
+	const (
+		appName       = "sensitive-app"
+		actualProject = "secret-project"
+		wrongProject  = "other-project"
+		deleter       = "deleter"
+		viewer        = "viewer"
+	)
+
+	app := newTestApp(func(a *v1alpha1.Application) {
+		a.Name = appName
+		a.Namespace = testNamespace
+		a.Spec.Project = actualProject
+	})
+
+	newServer := func(policy string) *Server {
+		return newApplicationActionTestServer(t, policy, newApplicationActionTestProject(actualProject), app.DeepCopy())
+	}
+
+	t.Run("not found", func(t *testing.T) {
+		server := newServer("p, deleter, applications, delete, secret-project/missing-app, allow")
+		name := "missing-app"
+		project := actualProject
+		_, err := server.Delete(newClaimsContext(t.Context(), deleter), &application.ApplicationDeleteRequest{Name: &name, Project: &project})
+		require.EqualError(t, err, "rpc error: code = NotFound desc = applications.argoproj.io \"missing-app\" not found")
+		assert.Equal(t, codes.NotFound, status.Code(err))
+	})
+
+	t.Run("permission denied", func(t *testing.T) {
+		server := newServer("p, viewer, applications, get, secret-project/sensitive-app, allow")
+		name := appName
+		_, err := server.Delete(newClaimsContext(t.Context(), viewer), &application.ApplicationDeleteRequest{Name: &name})
+		require.EqualError(t, err, common.PermissionDeniedAPIError.Error())
+		assert.Equal(t, codes.PermissionDenied, status.Code(err))
+		assert.NotContains(t, err.Error(), actualProject)
+	})
+
+	t.Run("project mismatch", func(t *testing.T) {
+		server := newServer("p, deleter, applications, delete, secret-project/sensitive-app, allow\np, deleter, applications, delete, other-project/sensitive-app, allow")
+		name := appName
+		project := wrongProject
+		_, err := server.Delete(newClaimsContext(t.Context(), deleter), &application.ApplicationDeleteRequest{Name: &name, Project: &project})
+		require.EqualError(t, err, "rpc error: code = NotFound desc = applications.argoproj.io \"sensitive-app\" not found")
+		assert.Equal(t, codes.NotFound, status.Code(err))
+		assert.NotContains(t, err.Error(), actualProject)
+	})
+
+	t.Run("normal access", func(t *testing.T) {
+		server := newServer("p, deleter, applications, delete, secret-project/sensitive-app, allow")
+		name := appName
+		_, err := server.Delete(newClaimsContext(t.Context(), deleter), &application.ApplicationDeleteRequest{Name: &name})
+		require.NoError(t, err)
+		_, getErr := server.appclientset.ArgoprojV1alpha1().Applications(testNamespace).Get(t.Context(), appName, metav1.GetOptions{})
+		assert.True(t, apierrors.IsNotFound(getErr))
+	})
+}
+
 func setSyncRunningOperationState(t *testing.T, appServer *Server) {
 	t.Helper()
 	appIf := appServer.appclientset.ArgoprojV1alpha1().Applications("default")
