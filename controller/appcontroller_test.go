@@ -2211,6 +2211,78 @@ func TestUpdateReconciledAt(t *testing.T) {
 	})
 }
 
+func TestProcessAppRefreshQueueItemComparisonOutcomes(t *testing.T) {
+	hasCondition := func(app *v1alpha1.Application, conditionType v1alpha1.ApplicationConditionType) bool {
+		for _, condition := range app.Status.Conditions {
+			if condition.Type == conditionType {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("OutOfSync", func(t *testing.T) {
+		app := newFakeApp()
+		ctrl := newFakeController(t.Context(), &fakeData{
+			apps: []runtime.Object{app, &defaultProj},
+			manifestResponse: &apiclient.ManifestResponse{
+				Manifests: []string{PodManifest},
+				Namespace: test.FakeDestNamespace,
+				Server:    test.FakeClusterURL,
+				Revision:  "abc123",
+			},
+			managedLiveObjs: make(map[kube.ResourceKey]*unstructured.Unstructured),
+		}, nil)
+		key, _ := cache.MetaNamespaceKeyFunc(app)
+		ctrl.appRefreshQueue.AddRateLimited(key)
+
+		ctrl.processAppRefreshQueueItem()
+
+		updatedApp, err := ctrl.applicationClientset.ArgoprojV1alpha1().Applications(app.Namespace).Get(t.Context(), app.Name, metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, v1alpha1.SyncStatusCodeOutOfSync, updatedApp.Status.Sync.Status)
+	})
+
+	t.Run("Synced", func(t *testing.T) {
+		app := newFakeApp()
+		ctrl := newFakeController(t.Context(), &fakeData{
+			apps: []runtime.Object{app, &defaultProj},
+			manifestResponse: &apiclient.ManifestResponse{
+				Manifests: []string{},
+				Namespace: test.FakeDestNamespace,
+				Server:    test.FakeClusterURL,
+				Revision:  "abc123",
+			},
+			managedLiveObjs: make(map[kube.ResourceKey]*unstructured.Unstructured),
+		}, nil)
+		key, _ := cache.MetaNamespaceKeyFunc(app)
+		ctrl.appRefreshQueue.AddRateLimited(key)
+
+		ctrl.processAppRefreshQueueItem()
+
+		updatedApp, err := ctrl.applicationClientset.ArgoprojV1alpha1().Applications(app.Namespace).Get(t.Context(), app.Name, metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, v1alpha1.SyncStatusCodeSynced, updatedApp.Status.Sync.Status)
+	})
+
+	t.Run("ComparisonError", func(t *testing.T) {
+		app := newFakeApp()
+		ctrl := newFakeController(t.Context(), &fakeData{
+			apps:            []runtime.Object{app, &defaultProj},
+			managedLiveObjs: make(map[kube.ResourceKey]*unstructured.Unstructured),
+		}, errors.New("failed to load manifests"))
+		key, _ := cache.MetaNamespaceKeyFunc(app)
+		ctrl.requestAppRefresh(app.Name, CompareWithLatestForceResolve.Pointer(), nil)
+		ctrl.appRefreshQueue.AddRateLimited(key)
+
+		ctrl.processAppRefreshQueueItem()
+
+		updatedApp, err := ctrl.applicationClientset.ArgoprojV1alpha1().Applications(app.Namespace).Get(t.Context(), app.Name, metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.True(t, hasCondition(updatedApp, v1alpha1.ApplicationConditionComparisonError))
+	})
+}
+
 func TestUpdateHealthStatusTransitionTime(t *testing.T) {
 	deployment := kube.MustToUnstructured(&appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{

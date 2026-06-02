@@ -1806,39 +1806,7 @@ func (ctrl *ApplicationController) processAppRefreshQueueItem() (processNext boo
 		return processNext
 	}
 
-	var localManifests []string
-	if opState := app.Status.OperationState; opState != nil && opState.Operation.Sync != nil {
-		localManifests = opState.Operation.Sync.Manifests
-	}
-
-	revisions := make([]string, 0)
-	sources := make([]appv1.ApplicationSource, 0)
-
-	hasMultipleSources := app.Spec.HasMultipleSources()
-
-	// If we have multiple sources, we use all the sources under `sources` field and ignore source under `source` field.
-	// else we use the source under the source field.
-	if hasMultipleSources {
-		for _, source := range app.Spec.Sources {
-			// We do not perform any filtering of duplicate sources.
-			// Argo CD will apply and update the resources generated from the sources automatically
-			// based on the order in which manifests were generated
-			sources = append(sources, source)
-			revisions = append(revisions, source.TargetRevision)
-		}
-		if comparisonLevel == CompareWithRecent {
-			revisions = app.Status.Sync.Revisions
-		}
-	} else {
-		revision := app.Spec.GetSource().TargetRevision
-		if comparisonLevel == CompareWithRecent {
-			revision = app.Status.Sync.Revision
-		}
-		revisions = append(revisions, revision)
-		sources = append(sources, app.Spec.GetSource())
-	}
-
-	compareResult, err := ctrl.appStateManager.CompareAppState(app, project, revisions, sources, refreshType == appv1.RefreshTypeHard, comparisonLevel == CompareWithLatestForceResolve, localManifests, hasMultipleSources)
+	compareResult, err := ctrl.compareApplicationState(app, project, refreshType, comparisonLevel)
 
 	ts.AddCheckpoint("compare_app_state_ms")
 
@@ -1882,18 +1850,8 @@ func (ctrl *ApplicationController) processAppRefreshQueueItem() (processNext boo
 	}
 	ts.AddCheckpoint("auto_sync_ms")
 
-	if app.Status.ReconciledAt == nil || comparisonLevel >= CompareWithLatest {
-		app.Status.ReconciledAt = &now
-	}
-	app.Status.Sync = *compareResult.syncStatus
-	app.Status.Health.Status = compareResult.healthStatus
-	app.Status.Resources = compareResult.resources
-	sort.Slice(app.Status.Resources, func(i, j int) bool {
-		return resourceStatusKey(app.Status.Resources[i]) < resourceStatusKey(app.Status.Resources[j])
-	})
-	app.Status.SourceType = compareResult.appSourceType
-	app.Status.SourceTypes = compareResult.appSourceTypes
-	app.Status.ControllerNamespace = ctrl.namespace
+	ctrl.updateSyncStatus(app, comparisonLevel, now, compareResult)
+	ctrl.updateHealthStatus(app, compareResult)
 	ts.AddCheckpoint("app_status_update_ms")
 	// Update finalizers BEFORE persisting status to avoid race condition where app shows "Synced"
 	// but doesn't have finalizers yet, which would allow deletion without running pre-delete hooks
@@ -1932,6 +1890,83 @@ func (ctrl *ApplicationController) processAppRefreshQueueItem() (processNext boo
 	// This is a partly a duplicate of patch_ms, but more descriptive and allows to have measurement for the next step.
 	ts.AddCheckpoint("persist_app_status_ms")
 	return processNext
+}
+
+type appComparisonRequest struct {
+	localManifests     []string
+	revisions          []string
+	sources            []appv1.ApplicationSource
+	hasMultipleSources bool
+}
+
+func (ctrl *ApplicationController) compareApplicationState(app *appv1.Application, project *appv1.AppProject, refreshType appv1.RefreshType, comparisonLevel CompareWith) (*comparisonResult, error) {
+	comparisonRequest := ctrl.buildAppComparisonRequest(app, comparisonLevel)
+	return ctrl.appStateManager.CompareAppState(
+		app,
+		project,
+		comparisonRequest.revisions,
+		comparisonRequest.sources,
+		refreshType == appv1.RefreshTypeHard,
+		comparisonLevel == CompareWithLatestForceResolve,
+		comparisonRequest.localManifests,
+		comparisonRequest.hasMultipleSources,
+	)
+}
+
+func (ctrl *ApplicationController) buildAppComparisonRequest(app *appv1.Application, comparisonLevel CompareWith) appComparisonRequest {
+	comparisonRequest := appComparisonRequest{
+		localManifests:     ctrl.getDesiredManifests(app),
+		hasMultipleSources: app.Spec.HasMultipleSources(),
+	}
+	comparisonRequest.revisions, comparisonRequest.sources = ctrl.getComparisonSources(app, comparisonLevel, comparisonRequest.hasMultipleSources)
+	return comparisonRequest
+}
+
+func (ctrl *ApplicationController) getDesiredManifests(app *appv1.Application) []string {
+	if opState := app.Status.OperationState; opState != nil && opState.Operation.Sync != nil {
+		return opState.Operation.Sync.Manifests
+	}
+	return nil
+}
+
+func (ctrl *ApplicationController) getComparisonSources(app *appv1.Application, comparisonLevel CompareWith, hasMultipleSources bool) ([]string, []appv1.ApplicationSource) {
+	revisions := make([]string, 0)
+	sources := make([]appv1.ApplicationSource, 0)
+	if hasMultipleSources {
+		for _, source := range app.Spec.Sources {
+			sources = append(sources, source)
+			revisions = append(revisions, source.TargetRevision)
+		}
+		if comparisonLevel == CompareWithRecent {
+			revisions = app.Status.Sync.Revisions
+		}
+		return revisions, sources
+	}
+	revision := app.Spec.GetSource().TargetRevision
+	if comparisonLevel == CompareWithRecent {
+		revision = app.Status.Sync.Revision
+	}
+	revisions = append(revisions, revision)
+	sources = append(sources, app.Spec.GetSource())
+	return revisions, sources
+}
+
+func (ctrl *ApplicationController) updateSyncStatus(app *appv1.Application, comparisonLevel CompareWith, now metav1.Time, compareResult *comparisonResult) {
+	if app.Status.ReconciledAt == nil || comparisonLevel >= CompareWithLatest {
+		app.Status.ReconciledAt = &now
+	}
+	app.Status.Sync = *compareResult.syncStatus
+	app.Status.Resources = compareResult.resources
+	sort.Slice(app.Status.Resources, func(i, j int) bool {
+		return resourceStatusKey(app.Status.Resources[i]) < resourceStatusKey(app.Status.Resources[j])
+	})
+	app.Status.SourceType = compareResult.appSourceType
+	app.Status.SourceTypes = compareResult.appSourceTypes
+	app.Status.ControllerNamespace = ctrl.namespace
+}
+
+func (ctrl *ApplicationController) updateHealthStatus(app *appv1.Application, compareResult *comparisonResult) {
+	app.Status.Health.Status = compareResult.healthStatus
 }
 
 func (ctrl *ApplicationController) processAppHydrateQueueItem() (processNext bool) {
