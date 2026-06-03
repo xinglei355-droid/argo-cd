@@ -1,0 +1,227 @@
+diff --git a/util/rbac/rbac_test.go b/util/rbac/rbac_test.go
+index 121c5a25d..900a518aa 100644
+--- a/util/rbac/rbac_test.go
++++ b/util/rbac/rbac_test.go
+@@ -569,3 +569,222 @@ func TestLoadPolicyLine(t *testing.T) {
+ 		require.Error(t, loadPolicyLine(policy, model))
+ 	})
+ }
++
++// TestApplicationEnforcements tests the Application permission judgement logic
++func TestApplicationEnforcements(t *testing.T) {
++	kubeclientset := fake.NewClientset(fakeConfigMap())
++	enf := NewEnforcer(kubeclientset, fakeNamespace, fakeConfigMapName, nil)
++
++	policy := `
++# Project scoped permissions
++p, alice, applications, get, proj1/*, allow
++p, alice, applications, sync, proj1/*, allow
++p, alice, applications, delete, proj1/*, allow
++p, alice, applications, override, proj1/*, allow
++
++# Namespace/name specific permissions
++p, bob, applications, get, proj2/app1, allow
++p, bob, applications, sync, proj2/app1, allow
++p, bob, applications, delete, proj2/app1, allow
++p, bob, applications, override, proj2/app1, allow
++
++# Wildcard permissions
++p, charlie, applications, *, *, allow
++
++# Deny policy - higher priority
++p, dave, applications, get, proj3/*, allow
++p, dave, applications, get, proj3/sensitive, deny
++p, dave, applications, sync, proj3/sensitive, deny
++p, dave, applications, delete, proj3/sensitive, deny
++p, dave, applications, override, proj3/sensitive, deny
++`
++	_ = enf.SetUserPolicy(policy)
++
++	type testCase struct {
++		name     string
++		subject  string
++		action   string
++		resource string
++		expected bool
++	}
++
++	testCases := []testCase{
++		// Project scoped resource tests
++		{
++			name:     "alice-get-proj1-app1",
++			subject:  "alice",
++			action:   ActionGet,
++			resource: "proj1/app1",
++			expected: true,
++		},
++		{
++			name:     "alice-sync-proj1-app2",
++			subject:  "alice",
++			action:   ActionSync,
++			resource: "proj1/app2",
++			expected: true,
++		},
++		{
++			name:     "alice-delete-proj1-app3",
++			subject:  "alice",
++			action:   ActionDelete,
++			resource: "proj1/app3",
++			expected: true,
++		},
++		{
++			name:     "alice-override-proj1-app4",
++			subject:  "alice",
++			action:   ActionOverride,
++			resource: "proj1/app4",
++			expected: true,
++		},
++		{
++			name:     "alice-get-proj2-app1",
++			subject:  "alice",
++			action:   ActionGet,
++			resource: "proj2/app1",
++			expected: false,
++		},
++
++		// Namespace/name specific resource tests
++		{
++			name:     "bob-get-proj2-app1",
++			subject:  "bob",
++			action:   ActionGet,
++			resource: "proj2/app1",
++			expected: true,
++		},
++		{
++			name:     "bob-sync-proj2-app1",
++			subject:  "bob",
++			action:   ActionSync,
++			resource: "proj2/app1",
++			expected: true,
++		},
++		{
++			name:     "bob-delete-proj2-app1",
++			subject:  "bob",
++			action:   ActionDelete,
++			resource: "proj2/app1",
++			expected: true,
++		},
++		{
++			name:     "bob-override-proj2-app1",
++			subject:  "bob",
++			action:   ActionOverride,
++			resource: "proj2/app1",
++			expected: true,
++		},
++		{
++			name:     "bob-get-proj2-app2",
++			subject:  "bob",
++			action:   ActionGet,
++			resource: "proj2/app2",
++			expected: false,
++		},
++
++		// Wildcard resource tests
++		{
++			name:     "charlie-get-proj1-app1",
++			subject:  "charlie",
++			action:   ActionGet,
++			resource: "proj1/app1",
++			expected: true,
++		},
++		{
++			name:     "charlie-sync-proj2-app2",
++			subject:  "charlie",
++			action:   ActionSync,
++			resource: "proj2/app2",
++			expected: true,
++		},
++		{
++			name:     "charlie-delete-proj3-app3",
++			subject:  "charlie",
++			action:   ActionDelete,
++			resource: "proj3/app3",
++			expected: true,
++		},
++		{
++			name:     "charlie-override-proj4-app4",
++			subject:  "charlie",
++			action:   ActionOverride,
++			resource: "proj4/app4",
++			expected: true,
++		},
++
++		// Deny policy priority tests
++		{
++			name:     "dave-get-proj3-normal",
++			subject:  "dave",
++			action:   ActionGet,
++			resource: "proj3/normal",
++			expected: true,
++		},
++		{
++			name:     "dave-get-proj3-sensitive",
++			subject:  "dave",
++			action:   ActionGet,
++			resource: "proj3/sensitive",
++			expected: false,
++		},
++		{
++			name:     "dave-sync-proj3-sensitive",
++			subject:  "dave",
++			action:   ActionSync,
++			resource: "proj3/sensitive",
++			expected: false,
++		},
++		{
++			name:     "dave-delete-proj3-sensitive",
++			subject:  "dave",
++			action:   ActionDelete,
++			resource: "proj3/sensitive",
++			expected: false,
++		},
++		{
++			name:     "dave-override-proj3-sensitive",
++			subject:  "dave",
++			action:   ActionOverride,
++			resource: "proj3/sensitive",
++			expected: false,
++		},
++
++		// No matching policy tests
++		{
++			name:     "eve-get-proj5-app1",
++			subject:  "eve",
++			action:   ActionGet,
++			resource: "proj5/app1",
++			expected: false,
++		},
++		{
++			name:     "eve-sync-proj5-app1",
++			subject:  "eve",
++			action:   ActionSync,
++			resource: "proj5/app1",
++			expected: false,
++		},
++		{
++			name:     "eve-delete-proj5-app1",
++			subject:  "eve",
++			action:   ActionDelete,
++			resource: "proj5/app1",
++			expected: false,
++		},
++		{
++			name:     "eve-override-proj5-app1",
++			subject:  "eve",
++			action:   ActionOverride,
++			resource: "proj5/app1",
++			expected: false,
++		},
++	}
++
++	for _, tc := range testCases {
++		t.Run(tc.name, func(t *testing.T) {
++			actual := enf.Enforce(tc.subject, ResourceApplications, tc.action, tc.resource)
++			assert.Equal(t, tc.expected, actual)
++		})
++	}
++}
