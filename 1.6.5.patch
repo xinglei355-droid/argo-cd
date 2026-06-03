@@ -1,0 +1,46 @@
+diff --git a/.github/workflows/ci-build.yaml b/.github/workflows/ci-build.yaml
+index 3d155fb97..6792e807e 100644
+--- a/.github/workflows/ci-build.yaml
++++ b/.github/workflows/ci-build.yaml
+@@ -1,4 +1,14 @@
+ name: Integration tests
++# This workflow runs Go-related validation (test, lint, build, codegen, e2e).
++# It triggers only when Go source code, module files, Makefile, or hack scripts change.
++# It does NOT trigger on documentation, UI, or release-only changes.
++# Trigger scope:
++#   - Go source files: **/*.go
++#   - Go module files: go.mod, go.sum
++#   - Build configuration: Makefile
++#   - Build/hack scripts: hack/**
++#   - Workflow itself: .github/workflows/ci-build.yaml
++#   - Linter configuration: .golangci.yaml
+ on:
+   push:
+     branches:
+@@ -6,10 +16,26 @@ on:
+       - 'release-*'
+       - '!release-1.4'
+       - '!release-1.5'
++    paths:
++      - '**/*.go'
++      - 'go.mod'
++      - 'go.sum'
++      - 'Makefile'
++      - 'hack/**'
++      - '.github/workflows/ci-build.yaml'
++      - '.golangci.yaml'
+   pull_request:
+     branches:
+       - 'master'
+       - 'release-*'
++    paths:
++      - '**/*.go'
++      - 'go.mod'
++      - 'go.sum'
++      - 'Makefile'
++      - 'hack/**'
++      - '.github/workflows/ci-build.yaml'
++      - '.golangci.yaml'
+ 
+ env:
+   # Golang version to use across CI steps
