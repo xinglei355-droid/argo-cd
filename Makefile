@@ -476,6 +476,39 @@ test-race-local:
 		DIST_DIR=${DIST_DIR} RERUN_FAILS=0 PACKAGES="$(TEST_MODULE)" ./hack/test.sh -race -args -test.gocoverdir="$(PWD)/test-results"; \
 	fi
 
+# Run tests for a specific Go package (uses Docker container)
+#
+# Usage:
+#   make test-go-package PACKAGE=./util/rbac
+#   make test-go-package PACKAGE=github.com/argoproj/argo-cd/v3/util/rbac
+#
+# Note: This target supports both relative and fully qualified package paths.
+#       It is optimized for quick testing of individual packages without
+#       running the entire test suite.
+.PHONY: test-go-package
+test-go-package: test-tools-image
+ifndef PACKAGE
+	$(error PACKAGE parameter is required. Example: make test-go-package PACKAGE=./util/rbac)
+endif
+	mkdir -p $(GOCACHE)
+	$(call run-in-test-client,make PACKAGE=$(PACKAGE) test-go-package-local)
+
+# Run tests for a specific Go package (local version)
+#
+# Usage:
+#   make test-go-package-local PACKAGE=./util/rbac
+#   make test-go-package-local PACKAGE=github.com/argoproj/argo-cd/v3/util/rbac
+#
+# Note: This is the local counterpart of test-go-package, running directly
+#       on your host machine without Docker.
+.PHONY: test-go-package-local
+test-go-package-local:
+ifndef PACKAGE
+	$(error PACKAGE parameter is required. Example: make test-go-package-local PACKAGE=./util/rbac)
+endif
+	mkdir -p $(PWD)/test-results
+	DIST_DIR=${DIST_DIR} RERUN_FAILS=0 TEST_MODULE="$(PACKAGE)" ./hack/test.sh -args -test.gocoverdir="$(PWD)/test-results"
+
 # Run the E2E test suite. E2E test servers (see start-e2e target) must be
 # started before.
 .PHONY: test-e2e
@@ -739,6 +772,7 @@ help:
 	@echo
 	@echo 'testing:'
 	@echo '  test(-local)'
+	@echo '  test-go-package(-local) -- test specific Go package (requires PACKAGE=)'
 	@echo '  start-e2e(-local)'
 	@echo '  test-e2e(-local)'
 	@echo '  test-race(-local)'
