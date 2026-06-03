@@ -32,6 +32,7 @@ jobs:
       backend: ${{ steps.filter.outputs.backend_any_changed }}
       frontend: ${{ steps.filter.outputs.frontend_any_changed }}
       docs: ${{ steps.filter.outputs.docs_any_changed }}
+      go_validation: ${{ steps.filter.outputs.go_validation_any_changed }}
     steps:
       - name: Harden the runner (Audit all outbound calls)
         if: ${{ vars.disable_harden_runner != 'true' }}
@@ -54,9 +55,17 @@ jobs:
               - Dockerfile
             docs:
               - 'docs/**'
+            # Run Go validation jobs only for Go sources, go.mod/go.sum, the root Makefile, or hack shell scripts.
+            go_validation:
+              - '**/*.go'
+              - '**/go.mod'
+              - '**/go.sum'
+              - 'Makefile'
+              - 'hack/*.sh'
+              - 'hack/**/*.sh'
   check-go:
     name: Ensure Go modules synchronicity
-    if: ${{ needs.changes.outputs.backend == 'true' }}
+    if: ${{ needs.changes.outputs.go_validation == 'true' }}
     runs-on: ubuntu-24.04
     needs:
       - changes
@@ -81,7 +90,7 @@ jobs:
           git diff --exit-code -- .
   build-go:
     name: Build & cache Go code
-    if: ${{ needs.changes.outputs.backend == 'true' }}
+    if: ${{ needs.changes.outputs.go_validation == 'true' }}
     runs-on: ubuntu-24.04
     needs:
       - changes
@@ -117,7 +126,7 @@ jobs:
       contents: read # for actions/checkout to fetch code
       pull-requests: read # for golangci/golangci-lint-action to fetch pull requests
     name: Lint Go code
-    if: ${{ needs.changes.outputs.backend == 'true' }}
+    if: ${{ needs.changes.outputs.go_validation == 'true' }}
     runs-on: ubuntu-24.04
     needs:
       - changes
@@ -142,7 +151,7 @@ jobs:
 
   test-go:
     name: Run unit tests for Go packages
-    if: ${{ needs.changes.outputs.backend == 'true' }}
+    if: ${{ needs.changes.outputs.go_validation == 'true' }}
     runs-on: ubuntu-24.04
     needs:
       - build-go
@@ -215,7 +224,7 @@ jobs:
 
   test-go-race:
     name: Run unit tests with -race for Go packages
-    if: ${{ needs.changes.outputs.backend == 'true' }}
+    if: ${{ needs.changes.outputs.go_validation == 'true' }}
     runs-on: ubuntu-24.04
     needs:
       - build-go
@@ -288,7 +297,7 @@ jobs:
 
   codegen:
     name: Check changes to generated code
-    if: ${{ needs.changes.outputs.backend == 'true' || needs.changes.outputs.docs == 'true'}}
+    if: ${{ needs.changes.outputs.go_validation == 'true' || needs.changes.outputs.docs == 'true' }}
     runs-on: ubuntu-24.04
     needs:
       - changes
