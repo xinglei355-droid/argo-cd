@@ -2,6 +2,7 @@ package rbac
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -189,6 +190,79 @@ func TestDefaultRole(t *testing.T) {
 	// after setting the default role to be the read-only role, this should now pass
 	enf.SetDefaultRole("role:readonly")
 	assert.True(t, enf.Enforce("bob", "applications", "get", "foo/bar"))
+}
+
+func TestApplicationPermissionTableDriven(t *testing.T) {
+	type scenario struct {
+		subject       string
+		requestObject string
+		expected      bool
+		policy        func(action string) string
+	}
+
+	actions := []string{ActionGet, ActionSync, ActionDelete, ActionOverride}
+	scenarios := []scenario{
+		{
+			subject:       "alice",
+			requestObject: "project-a/my-app",
+			expected:      true,
+			policy: func(action string) string {
+				return fmt.Sprintf("p, alice, applications, %s, project-a/my-app, allow", action)
+			},
+		},
+		{
+			subject:       "bob",
+			requestObject: "project-a/team-a/my-app",
+			expected:      true,
+			policy: func(action string) string {
+				return fmt.Sprintf("p, bob, applications, %s, project-a/team-a/my-app, allow", action)
+			},
+		},
+		{
+			subject:       "cathy",
+			requestObject: "project-a/team-a/my-app",
+			expected:      true,
+			policy: func(action string) string {
+				return fmt.Sprintf("p, cathy, applications, %s, project-a/*, allow", action)
+			},
+		},
+		{
+			subject:       "danny",
+			requestObject: "project-a/team-a/my-app",
+			expected:      false,
+			policy: func(action string) string {
+				return strings.Join([]string{
+					fmt.Sprintf("p, danny, applications, %s, project-a/*, allow", action),
+					fmt.Sprintf("p, danny, applications, %s, project-a/team-a/my-app, deny", action),
+				}, "\n")
+			},
+		},
+		{
+			subject:       "erin",
+			requestObject: "project-a/team-a/my-app",
+			expected:      false,
+			policy: func(action string) string {
+				return fmt.Sprintf("p, erin, applications, %s, project-b/*, allow", action)
+			},
+		},
+	}
+
+	for _, action := range actions {
+		action := action
+		for _, scenario := range scenarios {
+			scenario := scenario
+			decision := "deny"
+			if scenario.expected {
+				decision = "allow"
+			}
+
+			t.Run(fmt.Sprintf("subject=%s action=%s resource=%s decision=%s", scenario.subject, action, scenario.requestObject, decision), func(t *testing.T) {
+				enf := NewEnforcer(fake.NewClientset(), fakeNamespace, fakeConfigMapName, nil)
+				require.NoError(t, enf.SetUserPolicy(scenario.policy(action)))
+				assert.Equal(t, scenario.expected, enf.Enforce(scenario.subject, ResourceApplications, action, scenario.requestObject))
+			})
+		}
+	}
 }
 
 // TestConcurrentEnforceAndSyncUpdate exercises the same access pattern that produced
