@@ -42,13 +42,16 @@ jobs:
       - uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
         id: filter
         with:
-          # Any file which is not under docs/, ui/ or is not a markdown file is counted as a backend file
+          # 触发范围：
+          # backend: 只在 Go 源码 (**/*.go)、go.mod、go.sum、Makefile 或 hack 脚本 (hack/**) 变更时触发对应的 Go 校验 (测试、lint、codegen 等)。
+          # frontend/docs: 保持原样，不影响 UI 和 docs 相关 workflow。
           files_yaml: |
             backend:
-              - '!ui/**'
-              - '!**.md'
-              - '!**/*.md'
-              - '!docs/**'
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+              - 'Makefile'
+              - 'hack/**'
             frontend:
               - 'ui/**'
               - Dockerfile
