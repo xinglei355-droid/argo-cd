@@ -1,0 +1,56 @@
+diff --git a/Makefile b/Makefile
+index 1b58aaac8..db588f10e 100644
+--- a/Makefile
++++ b/Makefile
+@@ -476,6 +476,43 @@ test-race-local:
+ 		DIST_DIR=${DIST_DIR} RERUN_FAILS=0 PACKAGES="$(TEST_MODULE)" ./hack/test.sh -race -args -test.gocoverdir="$(PWD)/test-results"; \
+ 	fi
+ 
++# Run unit tests for a specific Go package.
++#
++# Usage:
++#   make test-go-package PACKAGE=./util/rbac
++#
++# The PACKAGE variable must be a relative path from the repository root
++# (e.g. ./util/rbac, ./pkg/apis/application/v1alpha1) or a fully qualified
++# Go module path (e.g. github.com/argoproj/argo-cd/v2/util/rbac).
++#
++# Docker / Trae container usage:
++#   By default, test-go-package runs inside the test-tools Docker container
++#   (same as `make test`). If you are already inside a Docker or Trae
++#   container where Go and test tools are available, use the -local variant:
++#     make test-go-package-local PACKAGE=./util/rbac
++#   This skips the Docker container launch and runs tests directly on the host.
++#
++#   If you want to skip building the test-tools image (e.g. in CI where the
++#   image is pre-built or in a Trae dev container), set SKIP_TEST_TOOLS_IMAGE=1:
++#     make test-go-package PACKAGE=./util/rbac SKIP_TEST_TOOLS_IMAGE=1
++.PHONY: test-go-package
++test-go-package: test-tools-image
++ifndef PACKAGE
++	$(error PACKAGE is required. Usage: make test-go-package PACKAGE=./util/rbac)
++endif
++	$(call run-in-test-client,make PACKAGE=$(PACKAGE) test-go-package-local)
++
++# Run unit tests for a specific Go package (local version).
++# Runs directly on the host without Docker. Ideal for use inside
++# Docker or Trae dev containers.
++.PHONY: test-go-package-local
++test-go-package-local:
++ifndef PACKAGE
++	$(error PACKAGE is required. Usage: make test-go-package-local PACKAGE=./util/rbac)
++endif
++	@echo "Testing package: $(PACKAGE)"
++	DIST_DIR=${DIST_DIR} RERUN_FAILS=0 PACKAGES=$(PACKAGE) ./hack/test.sh -args -test.gocoverdir="$(PWD)/test-results"
++
+ # Run the E2E test suite. E2E test servers (see start-e2e target) must be
+ # started before.
+ .PHONY: test-e2e
+@@ -739,6 +776,7 @@ help:
+ 	@echo
+ 	@echo 'testing:'
+ 	@echo '  test(-local)'
++	@echo '  test-go-package(-local)  -- run tests for a specific Go package (PACKAGE=./util/rbac)'
+ 	@echo '  start-e2e(-local)'
+ 	@echo '  test-e2e(-local)'
+ 	@echo '  test-race(-local)'
