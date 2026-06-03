@@ -1,0 +1,43 @@
+diff --git a/.github/workflows/ci-build.yaml b/.github/workflows/ci-build.yaml
+index 3d155fb97..3c69a18ab 100644
+--- a/.github/workflows/ci-build.yaml
++++ b/.github/workflows/ci-build.yaml
+@@ -1,4 +1,9 @@
+ name: Integration tests
++# 工作流触发策略说明：
++# - Go 相关作业（测试、lint、codegen）仅在 Go 源码、依赖、构建脚本或 hack 脚本变更时触发
++# - UI 相关作业仅在 UI 代码变更时触发
++# - 文档相关作业仅在 docs 目录变更时触发
++# - release、docs、UI 相关工作流不受此策略影响
+ on:
+   push:
+     branches:
+@@ -42,13 +47,23 @@ jobs:
+       - uses: tj-actions/changed-files@9426d40962ed5378910ee2e21d5f8c6fcbf2dd96 # v47.0.6
+         id: filter
+         with:
+-          # Any file which is not under docs/, ui/ or is not a markdown file is counted as a backend file
++          # Go 相关文件变更检测：仅在 Go 源码、依赖、构建脚本和 hack 脚本变更时触发
++          # 触发范围包括：
++          # - 所有 .go 源文件
++          # - go.mod 和 go.sum 依赖文件
++          # - Makefile 和相关构建文件
++          # - hack/ 目录下的所有脚本
+           files_yaml: |
+             backend:
+-              - '!ui/**'
+-              - '!**.md'
+-              - '!**/*.md'
+-              - '!docs/**'
++              - '**/*.go'
++              - 'go.mod'
++              - 'go.sum'
++              - 'Makefile'
++              - 'hack/**'
++              - '.github/workflows/ci-build.yaml'
++              - '.golangci.yml'
++              - 'go.work'
++              - 'go.work.sum'
+             frontend:
+               - 'ui/**'
+               - Dockerfile
