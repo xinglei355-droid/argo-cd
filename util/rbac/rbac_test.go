@@ -569,3 +569,203 @@ func TestLoadPolicyLine(t *testing.T) {
 		require.Error(t, loadPolicyLine(policy, model))
 	})
 }
+
+func TestEnforceApplicationPermissions(t *testing.T) {
+	cm := fakeConfigMap()
+	kubeclientset := fake.NewClientset(cm)
+	enf := NewEnforcer(kubeclientset, fakeNamespace, fakeConfigMapName, nil)
+	require.NoError(t, enf.syncUpdate(fakeConfigMap(), noOpUpdate))
+
+	policy := `
+p, role:proj-admin, applications, *, myproj/*, allow
+p, role:app-user, applications, get, myproj/myapp, allow
+p, role:app-user, applications, sync, myproj/myapp, allow
+p, role:global-admin, applications, *, */*, allow
+p, role:mixed-user, applications, *, myproj/*, allow
+p, role:mixed-user, applications, delete, myproj/*, deny
+p, role:mixed-user, applications, override, myproj/*, deny
+
+g, alice, role:proj-admin
+g, bob, role:app-user
+g, charlie, role:global-admin
+g, dave, role:mixed-user
+`
+	_ = enf.SetBuiltinPolicy(policy)
+
+	tests := []struct {
+		name     string
+		sub      string
+		act      string
+		obj      string
+		expected bool
+	}{
+		{
+			name:     "alice_get_project-scoped_myproj/myapp_allow",
+			sub:      "alice",
+			act:      "get",
+			obj:      "myproj/myapp",
+			expected: true,
+		},
+		{
+			name:     "alice_get_project-scoped_myproj/other_allow",
+			sub:      "alice",
+			act:      "get",
+			obj:      "myproj/other",
+			expected: true,
+		},
+		{
+			name:     "bob_get_specific_myproj/myapp_allow",
+			sub:      "bob",
+			act:      "get",
+			obj:      "myproj/myapp",
+			expected: true,
+		},
+		{
+			name:     "bob_get_specific_myproj/other_deny",
+			sub:      "bob",
+			act:      "get",
+			obj:      "myproj/other",
+			expected: false,
+		},
+		{
+			name:     "charlie_get_wildcard_otherproj/app_allow",
+			sub:      "charlie",
+			act:      "get",
+			obj:      "otherproj/app",
+			expected: true,
+		},
+		{
+			name:     "dave_get_allow-no-deny_myproj/myapp_allow",
+			sub:      "dave",
+			act:      "get",
+			obj:      "myproj/myapp",
+			expected: true,
+		},
+		{
+			name:     "eve_get_no-matching-policy_myproj/myapp_deny",
+			sub:      "eve",
+			act:      "get",
+			obj:      "myproj/myapp",
+			expected: false,
+		},
+		{
+			name:     "alice_sync_project-scoped_myproj/myapp_allow",
+			sub:      "alice",
+			act:      "sync",
+			obj:      "myproj/myapp",
+			expected: true,
+		},
+		{
+			name:     "bob_sync_specific_myproj/myapp_allow",
+			sub:      "bob",
+			act:      "sync",
+			obj:      "myproj/myapp",
+			expected: true,
+		},
+		{
+			name:     "bob_sync_specific_myproj/other_deny",
+			sub:      "bob",
+			act:      "sync",
+			obj:      "myproj/other",
+			expected: false,
+		},
+		{
+			name:     "charlie_sync_wildcard_otherproj/app_allow",
+			sub:      "charlie",
+			act:      "sync",
+			obj:      "otherproj/app",
+			expected: true,
+		},
+		{
+			name:     "dave_sync_allow-no-deny_myproj/myapp_allow",
+			sub:      "dave",
+			act:      "sync",
+			obj:      "myproj/myapp",
+			expected: true,
+		},
+		{
+			name:     "eve_sync_no-matching-policy_myproj/myapp_deny",
+			sub:      "eve",
+			act:      "sync",
+			obj:      "myproj/myapp",
+			expected: false,
+		},
+		{
+			name:     "alice_delete_project-scoped_myproj/myapp_allow",
+			sub:      "alice",
+			act:      "delete",
+			obj:      "myproj/myapp",
+			expected: true,
+		},
+		{
+			name:     "charlie_delete_wildcard_otherproj/app_allow",
+			sub:      "charlie",
+			act:      "delete",
+			obj:      "otherproj/app",
+			expected: true,
+		},
+		{
+			name:     "bob_delete_specific_myproj/myapp_deny",
+			sub:      "bob",
+			act:      "delete",
+			obj:      "myproj/myapp",
+			expected: false,
+		},
+		{
+			name:     "dave_delete_deny-override_myproj/myapp_deny",
+			sub:      "dave",
+			act:      "delete",
+			obj:      "myproj/myapp",
+			expected: false,
+		},
+		{
+			name:     "eve_delete_no-matching-policy_myproj/myapp_deny",
+			sub:      "eve",
+			act:      "delete",
+			obj:      "myproj/myapp",
+			expected: false,
+		},
+		{
+			name:     "alice_override_project-scoped_myproj/myapp_allow",
+			sub:      "alice",
+			act:      "override",
+			obj:      "myproj/myapp",
+			expected: true,
+		},
+		{
+			name:     "charlie_override_wildcard_otherproj/app_allow",
+			sub:      "charlie",
+			act:      "override",
+			obj:      "otherproj/app",
+			expected: true,
+		},
+		{
+			name:     "bob_override_specific_myproj/myapp_deny",
+			sub:      "bob",
+			act:      "override",
+			obj:      "myproj/myapp",
+			expected: false,
+		},
+		{
+			name:     "dave_override_deny-override_myproj/myapp_deny",
+			sub:      "dave",
+			act:      "override",
+			obj:      "myproj/myapp",
+			expected: false,
+		},
+		{
+			name:     "eve_override_no-matching-policy_myproj/myapp_deny",
+			sub:      "eve",
+			act:      "override",
+			obj:      "myproj/myapp",
+			expected: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := enf.Enforce(tc.sub, "applications", tc.act, tc.obj)
+			assert.Equal(t, tc.expected, result, "Enforce(%q, applications, %q, %q)", tc.sub, tc.act, tc.obj)
+		})
+	}
+}
