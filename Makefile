@@ -432,6 +432,33 @@ build: test-tools-image
 build-local:
 	GODEBUG="tarinsecurepath=0,zipinsecurepath=0" go build -v `go list ./... | grep -v 'resource_customizations\|test/e2e'`
 
+TEST_GO_PACKAGE=$(strip $(if $(filter file,$(origin PACKAGE)),$(TEST_PACKAGE),$(PACKAGE)))
+
+define require-test-go-package
+	@if test -z "$(TEST_GO_PACKAGE)"; then \
+		echo 'PACKAGE is required. Usage: make test-go-package PACKAGE=./util/rbac'; \
+		echo 'If you are already inside Docker or a Trae container, use make test-go-package-local PACKAGE=./util/rbac'; \
+		exit 1; \
+	fi
+endef
+
+# Run tests for a single Go package without executing the full unit test suite.
+# test-go-package uses the argocd-test-tools Docker image; in Docker or Trae containers use test-go-package-local instead.
+.PHONY: test-go-package
+# Example: make test-go-package PACKAGE=./util/rbac
+# Example in Docker or Trae: make test-go-package-local PACKAGE=./util/rbac
+
+test-go-package:
+	$(call require-test-go-package)
+	$(MAKE) test-tools-image
+	mkdir -p $(GOCACHE)
+	$(call run-in-test-client,make TEST_PACKAGE='$(TEST_GO_PACKAGE)' test-go-package-local)
+
+.PHONY: test-go-package-local
+test-go-package-local:
+	$(call require-test-go-package)
+	$(MAKE) TEST_MODULE='$(TEST_GO_PACKAGE)' test-local
+
 # Run all unit tests
 #
 # If TEST_MODULE is set (to fully qualified module name), only this specific
@@ -739,6 +766,7 @@ help:
 	@echo
 	@echo 'testing:'
 	@echo '  test(-local)'
+	@echo '  test-go-package(-local) -- pass PACKAGE=./path/to/package'
 	@echo '  start-e2e(-local)'
 	@echo '  test-e2e(-local)'
 	@echo '  test-race(-local)'
