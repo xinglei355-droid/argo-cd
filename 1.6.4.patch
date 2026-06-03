@@ -1,0 +1,53 @@
+diff --git a/.github/workflows/ci-build.yaml b/.github/workflows/ci-build.yaml
+index 3d155fb97..6c8f9f3bc 100644
+--- a/.github/workflows/ci-build.yaml
++++ b/.github/workflows/ci-build.yaml
+@@ -1,4 +1,9 @@
+ name: Integration tests
++# 触发范围说明：
++# - Go 源码（**.go）、go.mod、go.sum 变更时触发 Go 编译、测试、lint、codegen 校验
++# - Makefile 和 hack/ 脚本变更时也会触发，因为这些影响 Go 构建和测试流程
++# - ui/** 和 pnpm-lock.yaml 变更时触发 UI 构建、测试和 lint
++# - 纯文档（docs/、*.md）变更不会触发此 workflow
+ on:
+   push:
+     branches:
+@@ -6,10 +11,38 @@ on:
+       - 'release-*'
+       - '!release-1.4'
+       - '!release-1.5'
++    paths:
++      - '**.go'
++      - 'go.mod'
++      - 'go.sum'
++      - 'Makefile'
++      - 'hack/**'
++      - 'ui/**'
++      - '**/pnpm-lock.yaml'
++      - 'Dockerfile'
++      - '.github/workflows/ci-build.yaml'
++      - '*.sh'
++      - 'VERSION'
++      - 'assets/**'
++      - '**/*.proto'
+   pull_request:
+     branches:
+       - 'master'
+       - 'release-*'
++    paths:
++      - '**.go'
++      - 'go.mod'
++      - 'go.sum'
++      - 'Makefile'
++      - 'hack/**'
++      - 'ui/**'
++      - '**/pnpm-lock.yaml'
++      - 'Dockerfile'
++      - '.github/workflows/ci-build.yaml'
++      - '*.sh'
++      - 'VERSION'
++      - 'assets/**'
++      - '**/*.proto'
+ 
+ env:
+   # Golang version to use across CI steps
