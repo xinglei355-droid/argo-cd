@@ -453,6 +453,27 @@ ifneq ($(if $(TEST_MODULE),,ALL)$(filter-out github.com/argoproj/argo-cd/gitops-
 	fi
 endif
 
+# Run tests for a specific Go package in the test-tools container.
+# Usage: make test-go-package PACKAGE=./util/rbac
+#
+# When running inside a Docker or Trae container, you can use the -local variant
+# to avoid spawning a nested container:
+#   make test-go-package-local PACKAGE=./util/rbac
+.PHONY: test-go-package
+test-go-package: test-tools-image
+ifeq ($(PACKAGE),)
+	$(error PACKAGE is not defined. Usage: make test-go-package PACKAGE=./util/rbac)
+endif
+	mkdir -p $(GOCACHE)
+	$(call run-in-test-client,make PACKAGE=$(PACKAGE) test-go-package-local)
+
+.PHONY: test-go-package-local
+test-go-package-local:
+ifeq ($(PACKAGE),)
+	$(error PACKAGE is not defined. Usage: make test-go-package-local PACKAGE=./util/rbac)
+endif
+	DIST_DIR=${DIST_DIR} RERUN_FAILS=0 PACKAGES="$(PACKAGE)" ./hack/test.sh -args -test.gocoverdir="$(PWD)/test-results"
+
 # Run gitops-engine unit tests
 .PHONY: test-gitops-engine
 test-gitops-engine:
