@@ -1,33 +1,38 @@
-diff --git a/Makefile b/Makefile
-index 1b58aaac8..8ab3842f4 100644
---- a/Makefile
-+++ b/Makefile
-@@ -453,6 +453,28 @@ ifneq ($(if $(TEST_MODULE),,ALL)$(filter-out github.com/argoproj/argo-cd/gitops-
- 	fi
- endif
- 
-+# Run tests for a specific Go package.
-+# Example: make test-go-package PACKAGE=./util/rbac
-+# Note: When running in a Docker or Trae container environment where you want to execute tests 
-+# directly without spawning another docker container, you can use the `test-go-package-local` target instead:
-+# make test-go-package-local PACKAGE=./util/rbac
-+.PHONY: test-go-package
-+test-go-package: test-tools-image
-+ifeq ($(PACKAGE),)
-+	$(error PACKAGE is not defined. Usage: make test-go-package PACKAGE=./util/rbac)
-+endif
-+	mkdir -p $(GOCACHE)
-+	$(call run-in-test-client,make PACKAGE=$(PACKAGE) test-go-package-local)
-+
-+.PHONY: test-go-package-local
-+test-go-package-local:
-+ifeq ($(PACKAGE),)
-+	$(error PACKAGE is not defined. Usage: make test-go-package PACKAGE=./util/rbac)
-+endif
-+	DIST_DIR=${DIST_DIR} RERUN_FAILS=0 PACKAGES="$(PACKAGE)" ./hack/test.sh -args -test.gocoverdir="$(PWD)/test-results"
-+
-+
-+
- # Run gitops-engine unit tests
- .PHONY: test-gitops-engine
- test-gitops-engine:
+diff --git a/1.5.3.patch b/1.5.3.patch
+index c05bb1fcf..e69de29bb 100644
+--- a/1.5.3.patch
++++ b/1.5.3.patch
+@@ -1,33 +0,0 @@
+-diff --git a/Makefile b/Makefile
+-index 1b58aaac8..8ab3842f4 100644
+---- a/Makefile
+-+++ b/Makefile
+-@@ -453,6 +453,28 @@ ifneq ($(if $(TEST_MODULE),,ALL)$(filter-out github.com/argoproj/argo-cd/gitops-
+- 	fi
+- endif
+- 
+-+# Run tests for a specific Go package.
+-+# Example: make test-go-package PACKAGE=./util/rbac
+-+# Note: When running in a Docker or Trae container environment where you want to execute tests 
+-+# directly without spawning another docker container, you can use the `test-go-package-local` target instead:
+-+# make test-go-package-local PACKAGE=./util/rbac
+-+.PHONY: test-go-package
+-+test-go-package: test-tools-image
+-+ifeq ($(PACKAGE),)
+-+	$(error PACKAGE is not defined. Usage: make test-go-package PACKAGE=./util/rbac)
+-+endif
+-+	mkdir -p $(GOCACHE)
+-+	$(call run-in-test-client,make PACKAGE=$(PACKAGE) test-go-package-local)
+-+
+-+.PHONY: test-go-package-local
+-+test-go-package-local:
+-+ifeq ($(PACKAGE),)
+-+	$(error PACKAGE is not defined. Usage: make test-go-package PACKAGE=./util/rbac)
+-+endif
+-+	DIST_DIR=${DIST_DIR} RERUN_FAILS=0 PACKAGES="$(PACKAGE)" ./hack/test.sh -args -test.gocoverdir="$(PWD)/test-results"
+-+
+-+
+-+
+- # Run gitops-engine unit tests
+- .PHONY: test-gitops-engine
+- test-gitops-engine:
